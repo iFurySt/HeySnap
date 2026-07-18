@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  HeySnap app icon — single editable source of truth.
+  Concept: macOS squircle base (neutral graphite) + abstract "S" light-ring
+  built from two point-symmetric arcs (reads as S and as a camera aperture),
+  framed by faint screenshot crop marks. Monochrome / neutral.
+  Regenerate .icns via scripts/generate-app-icon.sh (do not hand-edit .icns).
+-->
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Squircle base: graphite top -> near-black bottom -->
+    <linearGradient id="baseFill" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2E2E33"/>
+      <stop offset="1" stop-color="#161619"/>
+    </linearGradient>
+    <!-- Silver light-ring gradient for the S -->
+    <linearGradient id="ringFill" x1="380" y1="340" x2="640" y2="690" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FAFAFC"/>
+      <stop offset="0.55" stop-color="#DCDCE0"/>
+      <stop offset="1" stop-color="#B9B9BF"/>
+    </linearGradient>
+    <!-- Subtle top sheen overlay -->
+    <linearGradient id="sheen" x1="512" y1="100" x2="512" y2="560" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <!-- Soft drop shadow under the ring for depth -->
+    <filter id="ringShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- Base -->
+  <rect x="100" y="100" width="824" height="824" rx="185.4" ry="185.4" fill="url(#baseFill)"/>
+  <!-- Top sheen -->
+  <rect x="100" y="100" width="824" height="824" rx="185.4" ry="185.4" fill="url(#sheen)"/>
+  <!-- Hairline edge for definition on light backgrounds -->
+  <rect x="100.75" y="100.75" width="822.5" height="822.5" rx="184.65" ry="184.65"
+        fill="none" stroke="#FFFFFF" stroke-opacity="0.06" stroke-width="1.5"/>
+
+  <!-- Faint screenshot crop marks (inner frame corners) -->
+  <g stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="14" stroke-linecap="round" fill="none">
+    <path d="M250 322 V250 H322"/>
+    <path d="M702 250 H774 V322"/>
+    <path d="M774 702 V774 H702"/>
+    <path d="M322 774 H250 V702"/>
+  </g>
+
+  <!-- Abstract "S" light-ring: two point-symmetric elliptical bowls (wider than
+       tall) meeting tangentially at center (512,512), giving a chunkier ~1.3:1 S.
+       Top hook opens right, bottom hook opens left; also reads as a camera aperture. -->
+  <g filter="url(#ringShadow)">
+    <path d="M662 416
+             A150 96 0 1 0 512 512
+             A150 96 0 1 1 362 608"
+          fill="none" stroke="url(#ringFill)" stroke-width="80" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -1,0 +1,144 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build, without the leading v"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release-macos-dmg:
+    runs-on: macos-26
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+
+      - name: Prepare HeySnap signing config
+        env:
+          HEYSNAP_CODESIGN_P12_BASE64: ${{ secrets.HEYSNAP_CODESIGN_P12_BASE64 }}
+          HEYSNAP_CODESIGN_P12_PASSWORD: ${{ secrets.HEYSNAP_CODESIGN_P12_PASSWORD }}
+          HEYSNAP_CODESIGN_KEYCHAIN_PASSWORD: ${{ secrets.HEYSNAP_CODESIGN_KEYCHAIN_PASSWORD }}
+          HEYSNAP_CODESIGN_IDENTITY: ${{ secrets.HEYSNAP_CODESIGN_IDENTITY }}
+        run: |
+          {
+            echo "HEYSNAP_CODESIGN_IDENTITY=-"
+            echo "HEYSNAP_CODESIGN_TIMESTAMP=false"
+            echo "HEYSNAP_CODESIGN_OPTIONS_RUNTIME=false"
+          } >> "${GITHUB_ENV}"
+
+          if [ -z "${HEYSNAP_CODESIGN_P12_BASE64}" ] || [ -z "${HEYSNAP_CODESIGN_P12_PASSWORD}" ]; then
+            echo "No Developer ID signing certificate configured; DMG will contain an ad-hoc signed app and notarization will be skipped."
+            exit 0
+          fi
+
+          keychain_password="${HEYSNAP_CODESIGN_KEYCHAIN_PASSWORD:-$(uuidgen)}"
+          cert_path="${RUNNER_TEMP}/heysnap-signing.p12"
+          keychain_path="${RUNNER_TEMP}/heysnap-signing.keychain-db"
+
+          CERT_PATH="${cert_path}" python3 -c 'import base64, os, pathlib; pathlib.Path(os.environ["CERT_PATH"]).write_bytes(base64.b64decode(os.environ["HEYSNAP_CODESIGN_P12_BASE64"]))'
+
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security import "${cert_path}" -k "${keychain_path}" -P "${HEYSNAP_CODESIGN_P12_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${keychain_password}" "${keychain_path}"
+
+          resolved_identity="${HEYSNAP_CODESIGN_IDENTITY:-}"
+          if [ -z "${resolved_identity}" ]; then
+            resolved_identity="$(security find-identity -v -p codesigning "${keychain_path}" | sed -n 's/.*"\(.*\)"/\1/p' | head -n 1)"
+          fi
+          if [ -z "${resolved_identity}" ]; then
+            echo "Imported signing certificate, but no usable codesigning identity was found in ${keychain_path}." >&2
+            exit 1
+          fi
+
+          echo "Resolved HeySnap signing identity: ${resolved_identity}"
+
+          {
+            echo "HEYSNAP_CODESIGN_IDENTITY=${resolved_identity}"
+            echo "HEYSNAP_CODESIGN_KEYCHAIN=${keychain_path}"
+            echo "HEYSNAP_CODESIGN_TIMESTAMP=true"
+            echo "HEYSNAP_CODESIGN_OPTIONS_RUNTIME=true"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build HeySnap DMG
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          WORKFLOW_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            version="${RELEASE_TAG#v}"
+          else
+            version="${WORKFLOW_VERSION#v}"
+          fi
+
+          ./scripts/build-macos-dmg.sh \
+            --version "${version}" \
+            --bundle-version "${GITHUB_RUN_NUMBER}"
+
+      - name: Notarize HeySnap DMG
+        if: ${{ github.event_name == 'push' }}
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          APPLE_NOTARY_API_KEY_P8_BASE64: ${{ secrets.APPLE_NOTARY_API_KEY_P8_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_DEVELOPER_TEAM_ID: ${{ secrets.APPLE_DEVELOPER_TEAM_ID || vars.APPLE_DEVELOPER_TEAM_ID }}
+        run: |
+          if [ "${HEYSNAP_CODESIGN_IDENTITY}" = "-" ]; then
+            echo "HeySnap is ad-hoc signed; skipping notarization."
+            exit 0
+          fi
+
+          if [ -z "${APPLE_NOTARY_API_KEY_P8_BASE64}" ] || [ -z "${APPLE_NOTARY_KEY_ID}" ] || [ -z "${APPLE_NOTARY_ISSUER_ID}" ] || [ -z "${APPLE_DEVELOPER_TEAM_ID}" ]; then
+            echo "No complete notary credentials configured; skipping notarization."
+            exit 0
+          fi
+
+          version="${RELEASE_TAG#v}"
+          dmg_path="dist/release/heysnap/HeySnap-${version}.dmg"
+          api_key_path="${RUNNER_TEMP}/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+
+          CERT_PATH="${api_key_path}" python3 -c 'import base64, os, pathlib; pathlib.Path(os.environ["CERT_PATH"]).write_bytes(base64.b64decode(os.environ["APPLE_NOTARY_API_KEY_P8_BASE64"]))'
+
+          xcrun notarytool submit "${dmg_path}" \
+            --key "${api_key_path}" \
+            --key-id "${APPLE_NOTARY_KEY_ID}" \
+            --issuer "${APPLE_NOTARY_ISSUER_ID}" \
+            --team-id "${APPLE_DEVELOPER_TEAM_ID}" \
+            --wait
+
+          xcrun stapler staple "${dmg_path}"
+
+      - name: Upload HeySnap release artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: heysnap-release-artifact
+          path: dist/release/heysnap/*.dmg
+          if-no-files-found: error
+
+      - name: Publish HeySnap DMG to GitHub Releases
+        if: ${{ github.event_name == 'push' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version="${RELEASE_TAG#v}"
+          dmg_path="dist/release/heysnap/HeySnap-${version}.dmg"
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "${dmg_path}" --clobber
+          else
+            gh release create "${RELEASE_TAG}" "${dmg_path}" \
+              --title "${RELEASE_TAG}" \
+              --generate-notes
+          fi
