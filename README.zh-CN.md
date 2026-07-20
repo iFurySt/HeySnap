@@ -6,7 +6,7 @@
 
 ---
 
-Native macOS screenshots, fast markup, local by default.
+一个好用的截图工具 🦞
 
 ## License
 
