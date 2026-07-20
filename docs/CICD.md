@@ -22,6 +22,7 @@ workflow 支持两档模式：
 - 配置 Developer ID 和 Notary secrets：使用 Developer ID Application 签名、启用 hardened runtime 和 timestamp，再对 DMG 执行 notarization 与 staple。
 
 本地 `scripts/build-macos-dmg.sh` 和 `scripts/build-macos-app.sh` 在未显式设置 `HEYSNAP_CODESIGN_IDENTITY` 时，都会优先使用当前 Keychain 中 Team ID `J9P29FA5BX` 的 `Developer ID Application` identity；找不到时 app 构建才回退到 Apple Development / Mac Developer。
+CI 会把导入 p12 的临时 keychain 放进 user keychain search list，再解析和使用 codesign identity，避免 runner 上 `codesign` 找不到刚导入的证书。
 
 签名 secrets：
 

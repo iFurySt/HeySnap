@@ -52,6 +52,14 @@ jobs:
           security import "${cert_path}" -k "${keychain_path}" -P "${HEYSNAP_CODESIGN_P12_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${keychain_password}" "${keychain_path}"
 
+          existing_keychains=()
+          while IFS= read -r keychain; do
+            if [ -n "${keychain}" ]; then
+              existing_keychains+=("${keychain}")
+            fi
+          done < <(security list-keychains -d user | sed -n 's/^[[:space:]]*"\(.*\)"$/\1/p')
+          security list-keychains -d user -s "${keychain_path}" "${existing_keychains[@]}"
+
           resolved_identity="${HEYSNAP_CODESIGN_IDENTITY:-}"
           if [ -z "${resolved_identity}" ]; then
             resolved_identity="$(security find-identity -v -p codesigning "${keychain_path}" | sed -n 's/.*"\(.*\)"/\1/p' | head -n 1)"
