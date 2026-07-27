@@ -470,6 +470,10 @@ private final class AreaSelectionSession {
             at: globalPoint,
             excludedWindowNumbers: excludedWindowNumbers
         ) {
+            if quickMarkupEnabled {
+                enterMarkupMode(rect: window.frame.integral)
+                return
+            }
             finish(.window(window))
             return
         }
