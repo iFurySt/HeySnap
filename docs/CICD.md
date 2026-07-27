@@ -1,15 +1,17 @@
 # CI/CD 说明
 
-HeySnap 当前有一条最小真实 release workflow，用于按 git tag 构建 macOS DMG 并上传到 GitHub Release。
+HeySnap 当前有一条最小真实 release workflow，用于按 git tag 构建 macOS DMG、生成 Sparkle appcast，并上传到 GitHub Release。
 
 ## 当前状态
 
 - Release workflow：`.github/workflows/release.yml`
 - 触发方式：push `v*` tag，例如 `v0.1.0`
 - 本地产物入口：`make macos-dmg` 或 `./scripts/build-macos-dmg.sh --version 0.1.0`
+- Sparkle appcast 入口：`make sparkle-appcast VERSION=0.1.0` 或 `./scripts/generate-sparkle-appcast.sh --version 0.1.0`
 - 本地 app 构建入口：`make macos-app`，会生成 `.build/macos/HeySnap.app` 并安装到 `~/Applications/HeySnap.app`。开发阶段统一打开安装路径，以保持 TCC 身份稳定；本地默认签名优先使用 Developer ID Application，找不到时才回退 Apple Development / Mac Developer。
-- CI 产物路径：`dist/release/heysnap/HeySnap-<version>.dmg`
-- GitHub Release：tag push 后 workflow 会创建或更新同 tag release，并上传 `HeySnap-<version>.dmg`。
+- CI 产物路径：`dist/release/heysnap/HeySnap-<version>.dmg` 和 `dist/release/heysnap/appcast.xml`
+- GitHub Release：tag push 后 workflow 会创建或更新同 tag release，并上传 `HeySnap-<version>.dmg` 和 `appcast.xml`。
+- App 内更新：`Info.plist` 的 `SUFeedURL` 指向 `https://github.com/iFurySt/HeySnap/releases/latest/download/appcast.xml`，Sparkle 会从最新 GitHub Release 读取 signed appcast，再下载同 tag 的 DMG。
 - 本地 `.apple/` 目录用于保存证书、私钥、notary API key 等 Apple 发布材料，已被 `.gitignore` 忽略，不能提交。
 
 PR gate、依赖扫描、SBOM 和 provenance 还没有接入。
@@ -38,18 +40,24 @@ CI 会把导入 p12 的临时 keychain 放进 user keychain search list，再解
 - `APPLE_NOTARY_ISSUER_ID`
 - `APPLE_DEVELOPER_TEAM_ID`：可放 repo variable 或 secret；当前团队是 `J9P29FA5BX`。
 
+Sparkle 更新签名：
+
+- `HEYSNAP_SPARKLE_ED_PRIVATE_KEY`：Sparkle EdDSA private key，用来签名 DMG enclosure 和 appcast。
+- 本地可把同一个 private key 放在 ignored `.apple/sparkle_ed_private_key`；提交到 git 的只有 `Info.plist` 里的 `SUPublicEDKey`。
+- workflow 在 notarization/staple 之后生成 appcast，确保 Sparkle 签名对应最终 DMG 字节。
+
 ## Release 流程
 
 1. 确认本地构建和测试通过。
 2. 更新用户可见 release note 与 history。
 3. 打 tag：`git tag -a v0.1.0 -m "v0.1.0"`。
 4. 推送：`git push origin main && git push origin v0.1.0`。
-5. 检查 Actions 和 GitHub Release asset：`gh release view v0.1.0 --json assets,body,url`。
+5. 检查 Actions 和 GitHub Release asset：`gh release view v0.1.0 --json assets,body,url`，确认包含 DMG 和 `appcast.xml`。
 
 更完整的发版检查见 `docs/releases/RELEASE_GUIDE.md`。
 
 ## 后续补强
 
 - 增加 PR gate，运行 `swift test` 和 macOS app build smoke。
-- 为 release 产物补 SBOM、第三方依赖 license/NOTICE 和 provenance。
+- 为 release 产物补 SBOM、第三方依赖 license/NOTICE 和 provenance，覆盖 Sparkle 与 WebP runtime 依赖。
 - 如果 workflow 失败暴露出新的流程坑，直接补回本文件或 release guide。

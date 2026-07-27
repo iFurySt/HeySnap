@@ -4,6 +4,7 @@
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
 | --- | --- | --- | --- |
+| 2026-07-27 | 发布 | 可以在 About 页手动检查 GitHub Releases 上的新版本，也可以开启后台自动检查和自动下载。 | 接入 Sparkle 2 更新机制：构建脚本固定下载并嵌入 `Sparkle.framework`，`Info.plist` 配置 signed appcast、公钥和自动更新默认值；release workflow 在 notarization/staple 后生成并上传 `appcast.xml`，供 app 从 GitHub Release 检测更新。 |
 | 2026-07-09 | 发布 | 可以通过 GitHub tag 自动获得 HeySnap macOS DMG，并挂到对应 GitHub Release。 | 注册 `com.ifuryst.HeySnap` Apple App ID；新增 `scripts/build-macos-dmg.sh`、tag 触发的 `.github/workflows/release.yml` 和 release guide，支持 Developer ID 签名、公证 secrets 与 ad-hoc 降级。 |
 | 2026-07-09 | macOS app | 可以按自己的工作流选择截图后直接保存，或进入编辑器继续标注。 | `General > Storage` 新增 `After capture` 下拉，支持 `Save to location` 和 `Open editor` 两种路由；热键截图、区域截图和窗口截图都会按该设置执行。 |
 | 2026-07-09 | macOS app | 截图后先进入编辑器，而不是立即落盘；可以在同一个窗口里标注、遮挡、裁切，再复制或保存。 | 新增并打磨独立 AppKit 截图编辑窗口：full-size titlebar 顶部工具条 + 棋盘格画布背景，打开时自动适配窗口，支持受控滚轮缩放、`Command+=` / `Command+-` / `Command+0` 缩放快捷键、选择/移动、带 start/control/end 三锚点的曲线箭头、文字、矩形、圆形、直线、高亮、马赛克遮挡、裁切、撤销/重做、复制和按设置保存。 |

@@ -1,6 +1,7 @@
 SLUG ?=
+VERSION ?=
 
-.PHONY: macos-app macos-app-build-only macos-dmg install-macos-app open-macos-app restart-macos-app new-history new-plan
+.PHONY: macos-app macos-app-build-only macos-dmg sparkle-appcast install-macos-app open-macos-app restart-macos-app new-history new-plan
 
 macos-app:
 	./scripts/build-macos-app.sh
@@ -10,6 +11,10 @@ macos-app-build-only:
 
 macos-dmg:
 	./scripts/build-macos-dmg.sh
+
+sparkle-appcast:
+	@if [ -z "$(VERSION)" ]; then echo "用法: make sparkle-appcast VERSION=0.1.0"; exit 1; fi
+	./scripts/generate-sparkle-appcast.sh --version "$(VERSION)"
 
 install-macos-app:
 	./scripts/build-macos-app.sh --install-user-app

@@ -8,12 +8,15 @@ HeySnap 当前有 GitHub Actions release workflow，会按 `v*` tag 构建 macOS
 
 当前 macOS app 构建脚本会在本机存在 Homebrew `webp` 时，把 `libwebp.7.dylib` 和 `libsharpyuv.0.dylib` 复制到 app bundle 的 `Contents/Frameworks`，用于 WebP 截图导出。这是运行时依赖，不通过 SwiftPM 管理；发布前需要固定来源版本、记录 license，并把对应 NOTICE/SBOM 纳入 release 产物。
 
+当前 macOS app 还会通过 `scripts/prepare-sparkle.sh` 下载 Sparkle 2.9.4 官方二进制 release tarball，并用 SHA-256 `ce89daf967db1e1893ed3ebd67575ed82d3902563e3191ca92aaec9164fbdef9` 校验后嵌入 `Sparkle.framework`。Sparkle 用于 app/distribution 层的自动更新，不进入 `packages/HeySnapCore`。发布 appcast 使用 EdDSA 签名：public key 写入 `Info.plist` 的 `SUPublicEDKey`，private key 只能放在 ignored `.apple/sparkle_ed_private_key` 或 CI secret `HEYSNAP_SPARKLE_ED_PRIVATE_KEY`。
+
 保留的默认约束是：
 
 - 不提交密钥、令牌或本地私有配置。
 - `.apple/` 是本地 Apple 证书、私钥、notary API key 和 profile/export 材料目录，必须保持 ignored；提交前应确认没有把其中内容复制到可追踪文件。
 - 接入真实依赖后，必须提交可审计的依赖清单和 lockfile。
 - GitHub Actions 应固定到不可变的 commit SHA，而不是漂移的版本标签；当前 release workflow 已固定 `actions/checkout` 和 `actions/upload-artifact`。
+- 第三方二进制依赖必须固定版本和校验值；当前 Sparkle 通过脚本固定版本与 SHA-256，WebP 仍依赖构建机 Homebrew 安装状态。
 - 未来计划开源，license 可能采用 AGPL 或开源核心 + 商业付费版本双轨；新增依赖前必须确认 license 与该方向兼容。
 
 ## 后续可接入的工具
@@ -34,6 +37,6 @@ HeySnap 当前有 GitHub Actions release workflow，会按 `v*` tag 构建 macOS
 
 - 锁定并提交项目真实依赖的 lockfile。
 - 让构建过程尽量可重复、可验证。
-- 为 macOS app 生成 release 包前补齐第三方依赖 license 清单和 NOTICE。
+- 为 macOS app 生成 release 包前补齐第三方依赖 license 清单和 NOTICE，至少覆盖 Sparkle、libwebp 和 libsharpyuv。
 - 如果条件允许，在部署链路里增加对 provenance 的校验。
 - 把 attestation 校验继续下沉到部署平台或准入层。

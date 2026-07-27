@@ -27,6 +27,7 @@ struct PreferencesRootView: View {
     @ObservedObject var settings: AppSettings
     @ObservedObject var hotKeyService: HotKeyService
     @ObservedObject var screenshotService: ScreenshotService
+    @ObservedObject var updateController: UpdateController
     @State private var selectedPage: PreferencesPage? = .general
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
@@ -105,7 +106,7 @@ struct PreferencesRootView: View {
             HotKeysSettingsView(settings: settings, hotKeyService: hotKeyService)
                 .navigationTitle("HotKeys")
         case .about:
-            AboutSettingsView()
+            AboutSettingsView(updateController: updateController)
                 .navigationTitle("About")
         }
     }
@@ -960,6 +961,8 @@ private struct HotKeysSettingsView: View {
 }
 
 private struct AboutSettingsView: View {
+    @ObservedObject var updateController: UpdateController
+
     var body: some View {
         SettingsPage {
             SettingsSection(title: "About", symbolName: "info.circle") {
@@ -987,6 +990,61 @@ private struct AboutSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            SettingsSection(title: "Updates", symbolName: "arrow.triangle.2.circlepath") {
+                SettingsRow(
+                    title: "Check for updates",
+                    subtitle: "Uses the signed appcast published with GitHub Releases."
+                ) {
+                    Button("Check Now") {
+                        updateController.checkForUpdates()
+                    }
+                    .disabled(!updateController.canCheckForUpdates)
+                }
+
+                SettingsSeparator()
+
+                SettingsRow(
+                    title: "Automatically check",
+                    subtitle: "HeySnap will look for new signed releases in the background."
+                ) {
+                    Toggle("Automatically check", isOn: automaticCheckBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .tint(Palette.switchOnTint)
+                }
+
+                SettingsSeparator()
+
+                SettingsRow(
+                    title: "Automatically download",
+                    subtitle: "Download and stage updates after an automatic check finds one."
+                ) {
+                    Toggle("Automatically download", isOn: automaticDownloadBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .controlSize(.small)
+                        .tint(Palette.switchOnTint)
+                        .disabled(!updateController.allowsAutomaticUpdates)
+                }
+            }
+        }
+    }
+
+    private var automaticCheckBinding: Binding<Bool> {
+        Binding {
+            updateController.automaticallyChecksForUpdates
+        } set: { newValue in
+            updateController.setAutomaticallyChecksForUpdates(newValue)
+        }
+    }
+
+    private var automaticDownloadBinding: Binding<Bool> {
+        Binding {
+            updateController.automaticallyDownloadsUpdates
+        } set: { newValue in
+            updateController.setAutomaticallyDownloadsUpdates(newValue)
         }
     }
 }

@@ -24,6 +24,7 @@ contents_dir="${app_dir}/Contents"
 macos_dir="${contents_dir}/MacOS"
 resources_dir="${contents_dir}/Resources"
 frameworks_dir="${contents_dir}/Frameworks"
+sparkle_install_dir=""
 
 while [[ "$#" -gt 0 ]]; do
   case "$1" in
@@ -133,6 +134,7 @@ resolve_codesign_identity() {
 mkdir -p "${module_cache}" "${tmp_dir}"
 rm -rf "${app_dir}"
 mkdir -p "${macos_dir}" "${resources_dir}" "${frameworks_dir}"
+sparkle_install_dir="$("${repo_root}/scripts/prepare-sparkle.sh")"
 
 cp "${resource_dir}/Info.plist" "${contents_dir}/Info.plist"
 if [[ -n "${bundle_short_version}" ]]; then
@@ -165,6 +167,7 @@ TMPDIR="${tmp_dir}" xcrun swiftc \
   -target arm64-apple-macosx26.0 \
   -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
   -module-cache-path "${module_cache}" \
+  -F "${sparkle_install_dir}" \
   -parse-as-library \
   -O \
   -Xlinker -rpath \
@@ -175,8 +178,24 @@ TMPDIR="${tmp_dir}" xcrun swiftc \
   -framework Carbon \
   -framework UniformTypeIdentifiers \
   -framework ImageIO \
+  -framework Sparkle \
   "${swift_sources[@]}" \
   -o "${macos_dir}/${app_name}"
+
+bundle_sparkle_framework() {
+  local sparkle_framework_source="${sparkle_install_dir}/Sparkle.framework"
+  local sparkle_framework_destination="${frameworks_dir}/Sparkle.framework"
+
+  if [[ ! -d "${sparkle_framework_source}" ]]; then
+    echo "Sparkle framework not found at ${sparkle_framework_source}" >&2
+    exit 1
+  fi
+
+  rm -rf "${sparkle_framework_destination}"
+  ditto "${sparkle_framework_source}" "${sparkle_framework_destination}"
+}
+
+bundle_sparkle_framework
 
 bundle_webp_dylibs() {
   local webp_lib=""
@@ -270,6 +289,22 @@ if compgen -G "${frameworks_dir}/*.dylib" >/dev/null; then
   for dylib_path in "${frameworks_dir}"/*.dylib; do
     codesign_path "${dylib_path}"
   done
+fi
+if [[ -d "${frameworks_dir}/Sparkle.framework" ]]; then
+  sparkle_version_dir="${frameworks_dir}/Sparkle.framework/Versions/B"
+  if [[ -d "${sparkle_version_dir}/XPCServices/Downloader.xpc" ]]; then
+    codesign_path "${sparkle_version_dir}/XPCServices/Downloader.xpc"
+  fi
+  if [[ -d "${sparkle_version_dir}/XPCServices/Installer.xpc" ]]; then
+    codesign_path "${sparkle_version_dir}/XPCServices/Installer.xpc"
+  fi
+  if [[ -d "${sparkle_version_dir}/Updater.app" ]]; then
+    codesign_path "${sparkle_version_dir}/Updater.app"
+  fi
+  if [[ -f "${sparkle_version_dir}/Autoupdate" ]]; then
+    codesign_path "${sparkle_version_dir}/Autoupdate"
+  fi
+  codesign_path "${frameworks_dir}/Sparkle.framework"
 fi
 codesign_path "${app_dir}"
 echo "codesign identity: ${resolved_identity_name}" >&2

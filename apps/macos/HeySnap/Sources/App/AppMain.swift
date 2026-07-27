@@ -13,7 +13,8 @@ struct HeySnapApp: App {
             PreferencesRootView(
                 settings: appDelegate.settings,
                 hotKeyService: appDelegate.hotKeyService,
-                screenshotService: appDelegate.screenshotService
+                screenshotService: appDelegate.screenshotService,
+                updateController: appDelegate.updateController
             )
             .frame(minWidth: 460, minHeight: 340)
         }
@@ -40,6 +41,7 @@ enum HeySnapWindowID {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var singleInstanceLockFileDescriptor: CInt = -1
     let settings = AppSettings()
+    let updateController = UpdateController()
     private(set) lazy var screenshotService = ScreenshotService(
         saveDirectoryProvider: { [settings] in settings.saveDirectoryURL },
         saveFormatPreferenceProvider: { [settings] in settings.saveFormatPreference },
@@ -61,6 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLogger.info("Application did finish launching.")
+        updateController.start()
         settings.onShortcutsChange = { [weak self] in
             self?.registerHotKey()
         }

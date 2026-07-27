@@ -8,6 +8,8 @@ HeySnap 当前还没有接入真实认证、外部 API、文件上传或专用�
 
 当前 macOS app 的截图、保存、权限状态和诊断日志都在本机完成，不上传屏幕内容。未来即使引入开源核心 + 商业付费版本，也应保持 capture、editor、OCR 等核心能力默认本地可用；任何网络、授权或商业功能开关必须明确放在 app/distribution 层，不应让核心截图路径依赖远端服务。
 
+当前唯一默认网络能力是 app/distribution 层的 Sparkle 更新检查：About 页面可手动检查更新，用户也可开启后台自动检查和自动下载。更新检查只访问 GitHub Release 上的 signed appcast 和 DMG，不上传截图内容或本地文件。Sparkle EdDSA private key 属于发布密钥，只能保存在 ignored `.apple/sparkle_ed_private_key` 或 CI secret `HEYSNAP_SPARKLE_ED_PRIVATE_KEY`，不得提交。
+
 建议维护的内容：
 
 - 认证与授权约束。

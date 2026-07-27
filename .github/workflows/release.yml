@@ -127,11 +127,31 @@ jobs:
 
           xcrun stapler staple "${dmg_path}"
 
+      - name: Generate Sparkle appcast
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          WORKFLOW_VERSION: ${{ inputs.version }}
+          HEYSNAP_SPARKLE_ED_PRIVATE_KEY: ${{ secrets.HEYSNAP_SPARKLE_ED_PRIVATE_KEY }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            version="${RELEASE_TAG#v}"
+            release_tag="${RELEASE_TAG}"
+          else
+            version="${WORKFLOW_VERSION#v}"
+            release_tag="v${version}"
+          fi
+
+          ./scripts/generate-sparkle-appcast.sh \
+            --version "${version}" \
+            --release-tag "${release_tag}"
+
       - name: Upload HeySnap release artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: heysnap-release-artifact
-          path: dist/release/heysnap/*.dmg
+          path: |
+            dist/release/heysnap/*.dmg
+            dist/release/heysnap/appcast.xml
           if-no-files-found: error
 
       - name: Publish HeySnap DMG to GitHub Releases
@@ -142,11 +162,12 @@ jobs:
         run: |
           version="${RELEASE_TAG#v}"
           dmg_path="dist/release/heysnap/HeySnap-${version}.dmg"
+          appcast_path="dist/release/heysnap/appcast.xml"
 
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            gh release upload "${RELEASE_TAG}" "${dmg_path}" --clobber
+            gh release upload "${RELEASE_TAG}" "${dmg_path}" "${appcast_path}" --clobber
           else
-            gh release create "${RELEASE_TAG}" "${dmg_path}" \
+            gh release create "${RELEASE_TAG}" "${dmg_path}" "${appcast_path}" \
               --title "${RELEASE_TAG}" \
               --generate-notes
           fi
