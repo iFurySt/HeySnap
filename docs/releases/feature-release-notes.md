@@ -4,6 +4,7 @@
 
 | 日期 | 功能域 | 用户价值 | 变更摘要 |
 | --- | --- | --- | --- |
+| 2026-07-28 | macOS app | quick markup 框选后点击勾时，即使马上切换窗口，也会复制原本框选的画面。 | quick markup 在进入选择前预捕获鼠标所在屏幕，确认、保存、pin 和打开编辑器时优先从预捕获快照裁切并合成标注，避免确认后重新截图导致抓到新前台窗口；异常场景保留实时截图回退。 |
 | 2026-07-27 | 发布 | 可以在 About 页手动检查 GitHub Releases 上的新版本，也可以开启后台自动检查和自动下载。 | 接入 Sparkle 2 更新机制：构建脚本固定下载并嵌入 `Sparkle.framework`，`Info.plist` 配置 signed appcast、公钥和自动更新默认值；release workflow 在 notarization/staple 后生成并上传 `appcast.xml`，供 app 从 GitHub Release 检测更新。 |
 | 2026-07-09 | 发布 | 可以通过 GitHub tag 自动获得 HeySnap macOS DMG，并挂到对应 GitHub Release。 | 注册 `com.ifuryst.HeySnap` Apple App ID；新增 `scripts/build-macos-dmg.sh`、tag 触发的 `.github/workflows/release.yml` 和 release guide，支持 Developer ID 签名、公证 secrets 与 ad-hoc 降级。 |
 | 2026-07-09 | macOS app | 可以按自己的工作流选择截图后直接保存，或进入编辑器继续标注。 | `General > Storage` 新增 `After capture` 下拉，支持 `Save to location` 和 `Open editor` 两种路由；热键截图、区域截图和窗口截图都会按该设置执行。 |

@@ -8,6 +8,13 @@ import UniformTypeIdentifiers
 struct CapturedScreenshot {
     let image: CGImage
     let scaleFactor: CGFloat
+    let sourceRect: CGRect?
+
+    init(image: CGImage, scaleFactor: CGFloat, sourceRect: CGRect? = nil) {
+        self.image = image
+        self.scaleFactor = scaleFactor
+        self.sourceRect = sourceRect
+    }
 }
 
 @MainActor
@@ -224,7 +231,8 @@ final class ScreenshotService: ObservableObject {
 
             return CapturedScreenshot(
                 image: image,
-                scaleFactor: scaleFactor(for: image, pointRect: captureRect)
+                scaleFactor: scaleFactor(for: image, pointRect: captureRect),
+                sourceRect: rect
             )
         }
 
@@ -262,7 +270,7 @@ final class ScreenshotService: ObservableObject {
                 configuration: configuration
             )
             let compositedImage = try await applyWindowBackground(to: image, windowFrame: window.frame)
-            return CapturedScreenshot(image: compositedImage, scaleFactor: scale)
+            return CapturedScreenshot(image: compositedImage, scaleFactor: scale, sourceRect: window.frame)
         }
 
         throw ScreenshotError.unsupportedOS
@@ -317,7 +325,8 @@ final class ScreenshotService: ObservableObject {
 
             return CapturedScreenshot(
                 image: image,
-                scaleFactor: scaleFactor(for: image, pointRect: rect)
+                scaleFactor: scaleFactor(for: image, pointRect: rect),
+                sourceRect: rect
             )
         }
 

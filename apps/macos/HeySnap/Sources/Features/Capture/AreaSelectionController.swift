@@ -4,12 +4,38 @@ import Carbon
 /// The outcome of an interactive capture selection session.
 enum CaptureSelection {
     case region(CGRect)
-    case copyRegion(CGRect, [OverlayMarkupAnnotation])
-    case saveRegion(CGRect, [OverlayMarkupAnnotation])
-    case pinRegion(CGRect, [OverlayMarkupAnnotation])
-    case editRegion(CGRect)
+    case copyRegion(CGRect, [OverlayMarkupAnnotation], CapturedScreenshot?)
+    case saveRegion(CGRect, [OverlayMarkupAnnotation], CapturedScreenshot?)
+    case pinRegion(CGRect, [OverlayMarkupAnnotation], CapturedScreenshot?)
+    case editRegion(CGRect, CapturedScreenshot?)
     case window(WindowDescriptor)
     case cancelled
+}
+
+private extension CaptureSelection {
+    var hasPreCapturedRegion: Bool {
+        switch self {
+        case .copyRegion(_, _, .some),
+             .saveRegion(_, _, .some),
+             .pinRegion(_, _, .some),
+             .editRegion(_, .some):
+            return true
+        default:
+            return false
+        }
+    }
+
+    var requiresOverlayClearBeforeCompletion: Bool {
+        switch self {
+        case .copyRegion,
+             .saveRegion,
+             .pinRegion,
+             .editRegion:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 /// Drives the interactive capture overlay: hover to highlight an app window and click to
@@ -38,6 +64,7 @@ private final class AreaSelectionSession {
     private let onComplete: (CaptureSelection) -> Void
     private let quickMarkupEnabled: Bool
     private let screenSnapshot: CapturedScreenshot?
+    private let snapshotScreenFrame: CGRect?
     private var windows: [AreaSelectionWindow] = []
     private var views: [AreaSelectionView] = []
     private weak var activeTextEditingView: AreaSelectionView?
@@ -92,6 +119,7 @@ private final class AreaSelectionSession {
     init(quickMarkupEnabled: Bool, screenSnapshot: CapturedScreenshot?, onComplete: @escaping (CaptureSelection) -> Void) {
         self.quickMarkupEnabled = quickMarkupEnabled
         self.screenSnapshot = screenSnapshot
+        self.snapshotScreenFrame = Self.snapshotScreenFrame(for: screenSnapshot)
         self.onComplete = onComplete
     }
 
@@ -126,11 +154,15 @@ private final class AreaSelectionSession {
 
     private static func screenSnapshotImage(_ snapshot: CapturedScreenshot?, for screenFrame: CGRect) -> CGImage? {
         guard let snapshot,
-              let mouseScreen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }),
-              mouseScreen.frame == screenFrame else {
+              let snapshotScreenFrame = snapshotScreenFrame(for: snapshot),
+              snapshotScreenFrame == screenFrame else {
             return nil
         }
         return snapshot.image
+    }
+
+    private static func snapshotScreenFrame(for snapshot: CapturedScreenshot?) -> CGRect? {
+        snapshot?.sourceRect
     }
 
     /// The rectangle currently highlighted in global coordinates, if any.
@@ -503,7 +535,8 @@ private final class AreaSelectionSession {
     func confirmMarkupToClipboard() {
         guard let markupRect else { return }
         commitActiveTextIfNeeded()
-        finish(.copyRegion(markupRect.integral, markupAnnotations))
+        let rect = markupRect.integral
+        finish(.copyRegion(rect, markupAnnotations, preCapturedRegion(for: rect)))
     }
 
     private func updateHover(globalPoint: CGPoint) {
@@ -588,24 +621,28 @@ private final class AreaSelectionSession {
         case .pin:
             if let markupRect {
                 commitActiveTextIfNeeded()
-                finish(.pinRegion(markupRect.integral, markupAnnotations))
+                let rect = markupRect.integral
+                finish(.pinRegion(rect, markupAnnotations, preCapturedRegion(for: rect)))
             }
         case .editor:
             if let markupRect {
                 commitActiveTextIfNeeded()
-                finish(.editRegion(markupRect.integral))
+                let rect = markupRect.integral
+                finish(.editRegion(rect, preCapturedRegion(for: rect)))
             }
         case .save:
             if let markupRect {
                 commitActiveTextIfNeeded()
-                finish(.saveRegion(markupRect.integral, markupAnnotations))
+                let rect = markupRect.integral
+                finish(.saveRegion(rect, markupAnnotations, preCapturedRegion(for: rect)))
             }
         case .cancel:
             cancel()
         case .done:
             if let markupRect {
                 commitActiveTextIfNeeded()
-                finish(.copyRegion(markupRect.integral, markupAnnotations))
+                let rect = markupRect.integral
+                finish(.copyRegion(rect, markupAnnotations, preCapturedRegion(for: rect)))
             }
         }
     }
@@ -1087,28 +1124,11 @@ private final class AreaSelectionSession {
         // cancel paths don't need this: window capture uses a content filter that excludes the
         // overlay, and cancel takes no screenshot.
         guard case .region = selection else {
-            if case .copyRegion = selection {
-                let complete = onComplete
-                Self.waitForOverlaysToClear(overlayNumbers) {
-                    complete(selection)
-                }
+            if selection.hasPreCapturedRegion {
+                onComplete(selection)
                 return
             }
-            if case .saveRegion = selection {
-                let complete = onComplete
-                Self.waitForOverlaysToClear(overlayNumbers) {
-                    complete(selection)
-                }
-                return
-            }
-            if case .pinRegion = selection {
-                let complete = onComplete
-                Self.waitForOverlaysToClear(overlayNumbers) {
-                    complete(selection)
-                }
-                return
-            }
-            if case .editRegion = selection {
+            if selection.requiresOverlayClearBeforeCompletion {
                 let complete = onComplete
                 Self.waitForOverlaysToClear(overlayNumbers) {
                     complete(selection)
@@ -1123,6 +1143,38 @@ private final class AreaSelectionSession {
         Self.waitForOverlaysToClear(overlayNumbers) {
             complete(selection)
         }
+    }
+
+    private func preCapturedRegion(for rect: CGRect) -> CapturedScreenshot? {
+        guard let screenSnapshot,
+              let snapshotScreenFrame,
+              rect.width > 1,
+              rect.height > 1 else {
+            return nil
+        }
+
+        let clippedRect = rect.intersection(snapshotScreenFrame).integral
+        guard !clippedRect.isNull,
+              clippedRect.width > 1,
+              clippedRect.height > 1,
+              abs(clippedRect.width - rect.width) < 1,
+              abs(clippedRect.height - rect.height) < 1 else {
+            return nil
+        }
+
+        let scaleX = CGFloat(screenSnapshot.image.width) / max(snapshotScreenFrame.width, 1)
+        let scaleY = CGFloat(screenSnapshot.image.height) / max(snapshotScreenFrame.height, 1)
+        let cropRect = CGRect(
+            x: (clippedRect.minX - snapshotScreenFrame.minX) * scaleX,
+            y: (snapshotScreenFrame.maxY - clippedRect.maxY) * scaleY,
+            width: clippedRect.width * scaleX,
+            height: clippedRect.height * scaleY
+        ).integral
+
+        guard let crop = screenSnapshot.image.cropping(to: cropRect) else {
+            return nil
+        }
+        return CapturedScreenshot(image: crop, scaleFactor: screenSnapshot.scaleFactor, sourceRect: clippedRect)
     }
 
     /// Polls (bounded) until the window server no longer reports `overlayNumbers` on screen,

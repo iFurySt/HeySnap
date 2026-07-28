@@ -199,21 +199,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Task { @MainActor in
                     await self.handleRegionCapture(rect: rect)
                 }
-            case .copyRegion(let rect, let annotations):
+            case .copyRegion(let rect, let annotations, let preCapturedRegion):
                 Task { @MainActor in
-                    await self.copyRegionToClipboard(rect: rect, annotations: annotations)
+                    await self.copyRegionToClipboard(rect: rect, annotations: annotations, preCapturedRegion: preCapturedRegion)
                 }
-            case .saveRegion(let rect, let annotations):
+            case .saveRegion(let rect, let annotations, let preCapturedRegion):
                 Task { @MainActor in
-                    await self.saveRegion(rect: rect, annotations: annotations)
+                    await self.saveRegion(rect: rect, annotations: annotations, preCapturedRegion: preCapturedRegion)
                 }
-            case .pinRegion(let rect, let annotations):
+            case .pinRegion(let rect, let annotations, let preCapturedRegion):
                 Task { @MainActor in
-                    await self.pinRegion(rect: rect, annotations: annotations)
+                    await self.pinRegion(rect: rect, annotations: annotations, preCapturedRegion: preCapturedRegion)
                 }
-            case .editRegion(let rect):
+            case .editRegion(let rect, let preCapturedRegion):
                 Task { @MainActor in
-                    await self.openEditorForRegion(rect: rect)
+                    await self.openEditorForRegion(rect: rect, preCapturedRegion: preCapturedRegion)
                 }
             case .window(let window):
                 Task { @MainActor in
@@ -279,8 +279,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppLogger.info("Screenshot editor opened.")
     }
 
-    private func copyRegionToClipboard(rect: CGRect, annotations: [OverlayMarkupAnnotation]) async {
-        guard let capture = await screenshotService.captureForEditing(rect: rect) else {
+    private func copyRegionToClipboard(rect: CGRect, annotations: [OverlayMarkupAnnotation], preCapturedRegion: CapturedScreenshot?) async {
+        guard let capture = await captureRegionForQuickMarkup(rect: rect, preCapturedRegion: preCapturedRegion) else {
             NSSound.beep()
             return
         }
@@ -297,8 +297,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppLogger.info("Quick markup region copied to clipboard.")
     }
 
-    private func saveRegion(rect: CGRect, annotations: [OverlayMarkupAnnotation]) async {
-        guard let capture = await screenshotService.captureForEditing(rect: rect) else {
+    private func saveRegion(rect: CGRect, annotations: [OverlayMarkupAnnotation], preCapturedRegion: CapturedScreenshot?) async {
+        guard let capture = await captureRegionForQuickMarkup(rect: rect, preCapturedRegion: preCapturedRegion) else {
             NSSound.beep()
             return
         }
@@ -312,16 +312,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func openEditorForRegion(rect: CGRect) async {
-        guard let capture = await screenshotService.captureForEditing(rect: rect) else {
+    private func openEditorForRegion(rect: CGRect, preCapturedRegion: CapturedScreenshot?) async {
+        guard let capture = await captureRegionForQuickMarkup(rect: rect, preCapturedRegion: preCapturedRegion) else {
             NSSound.beep()
             return
         }
         openEditor(with: capture)
     }
 
-    private func pinRegion(rect: CGRect, annotations: [OverlayMarkupAnnotation]) async {
-        guard let capture = await screenshotService.captureForEditing(rect: rect) else {
+    private func pinRegion(rect: CGRect, annotations: [OverlayMarkupAnnotation], preCapturedRegion: CapturedScreenshot?) async {
+        guard let capture = await captureRegionForQuickMarkup(rect: rect, preCapturedRegion: preCapturedRegion) else {
             NSSound.beep()
             return
         }
@@ -334,6 +334,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.showWindow(self)
         controller.window?.makeKeyAndOrderFront(self)
         AppLogger.info("Quick markup region pinned.")
+    }
+
+    private func captureRegionForQuickMarkup(rect: CGRect, preCapturedRegion: CapturedScreenshot?) async -> CapturedScreenshot? {
+        if let preCapturedRegion {
+            AppLogger.info("Quick markup region using pre-captured snapshot rect=\(rect).")
+            return preCapturedRegion
+        }
+        AppLogger.info("Quick markup region pre-captured snapshot unavailable; falling back to live capture rect=\(rect).")
+        return await screenshotService.captureForEditing(rect: rect)
     }
 }
 
