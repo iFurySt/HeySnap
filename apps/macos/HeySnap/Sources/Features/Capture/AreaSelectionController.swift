@@ -310,6 +310,10 @@ private final class AreaSelectionSession {
                 refreshOverlays()
                 return
             }
+            if clickCount >= 2, markupRect.contains(globalPoint) {
+                completeMarkup(.copy)
+                return
+            }
             if !hasMarkupAnnotations, let handle = hitMarkupHandle(at: globalPoint, in: markupRect) {
                 selectedMarkupAnnotationID = nil
                 activeMarkupHandle = handle
@@ -513,6 +517,16 @@ private final class AreaSelectionSession {
         finish(.cancelled)
     }
 
+    func handleRightMouseDown(globalPoint: CGPoint) {
+        guard let markupRect,
+              markupRect.contains(globalPoint),
+              markupBarRect?.contains(globalPoint) != true,
+              propertyBarRectGlobal()?.contains(globalPoint) != true else {
+            return
+        }
+        completeMarkup(.save)
+    }
+
     func handleMouseMoved(globalPoint: CGPoint) {
         refreshCursor(globalPoint: globalPoint)
     }
@@ -533,10 +547,19 @@ private final class AreaSelectionSession {
     }
 
     func confirmMarkupToClipboard() {
+        completeMarkup(.copy)
+    }
+
+    private func completeMarkup(_ action: OverlayMarkupCompletionAction) {
         guard let markupRect else { return }
         commitActiveTextIfNeeded()
         let rect = markupRect.integral
-        finish(.copyRegion(rect, markupAnnotations, preCapturedRegion(for: rect)))
+        switch action {
+        case .copy:
+            finish(.copyRegion(rect, markupAnnotations, preCapturedRegion(for: rect)))
+        case .save:
+            finish(.saveRegion(rect, markupAnnotations, preCapturedRegion(for: rect)))
+        }
     }
 
     private func updateHover(globalPoint: CGPoint) {
@@ -631,19 +654,11 @@ private final class AreaSelectionSession {
                 finish(.editRegion(rect, preCapturedRegion(for: rect)))
             }
         case .save:
-            if let markupRect {
-                commitActiveTextIfNeeded()
-                let rect = markupRect.integral
-                finish(.saveRegion(rect, markupAnnotations, preCapturedRegion(for: rect)))
-            }
+            completeMarkup(.save)
         case .cancel:
             cancel()
         case .done:
-            if let markupRect {
-                commitActiveTextIfNeeded()
-                let rect = markupRect.integral
-                finish(.copyRegion(rect, markupAnnotations, preCapturedRegion(for: rect)))
-            }
+            completeMarkup(.copy)
         }
     }
 
@@ -1392,6 +1407,12 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
     override func mouseUp(with event: NSEvent) {
         let point = globalPoint(from: event)
         session?.handleMouseUp(globalPoint: point)
+        session?.refreshCursor(globalPoint: point)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        let point = globalPoint(from: event)
+        session?.handleRightMouseDown(globalPoint: point)
         session?.refreshCursor(globalPoint: point)
     }
 
@@ -2147,6 +2168,11 @@ enum OverlayMarkupTool {
             return false
         }
     }
+}
+
+private enum OverlayMarkupCompletionAction {
+    case copy
+    case save
 }
 
 private struct QuickMarkupBarSlot {
