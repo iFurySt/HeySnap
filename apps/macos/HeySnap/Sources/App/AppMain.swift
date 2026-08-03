@@ -53,6 +53,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let areaSelectionController = AreaSelectionController()
     private var editorWindowControllers: [ScreenshotEditorWindowController] = []
     private var pinnedWindowControllers: [PinnedScreenshotWindowController] = []
+    private var isScrollingCaptureInProgress = false
+    private lazy var scrollingCaptureWorkflow = ScrollingCaptureWorkflow(
+        screenshotService: screenshotService,
+        logInfo: AppLogger.info,
+        logError: AppLogger.error
+    )
     private(set) lazy var hotKeyService = HotKeyService { [weak self] action in
         self?.handleHotKey(action)
     }
@@ -171,6 +177,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleHotKey(_ action: HotKeyAction) {
         AppLogger.info("Hotkey fired for \(action.displayName).")
+        if isScrollingCaptureInProgress {
+            AppLogger.info("Ignored \(action.displayName) hotkey while scrolling capture is running.")
+            NSSound.beep()
+            return
+        }
         switch action {
         case .screen:
             Task { @MainActor in
@@ -191,7 +202,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func beginAreaSelection(quickMarkupEnabled: Bool, screenSnapshot: CapturedScreenshot?) {
         areaSelectionController.beginSelection(
             quickMarkupEnabled: quickMarkupEnabled,
-            screenSnapshot: screenSnapshot
+            screenSnapshot: screenSnapshot,
+            onScrollingCapture: { [weak self] rect, cancellation, completion in
+                Task { @MainActor in
+                    guard let self else {
+                        completion(nil)
+                        return
+                    }
+                    let capture = await self.captureScrollingRegion(rect: rect, cancellation: cancellation)
+                    completion(capture)
+                }
+            }
         ) { [weak self] selection in
             guard let self else { return }
             switch selection {
@@ -215,6 +236,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Task { @MainActor in
                     await self.openEditorForRegion(rect: rect, preCapturedRegion: preCapturedRegion)
                 }
+            case .scrollingCapture(let capture):
+                self.openEditor(with: capture)
             case .window(let window):
                 Task { @MainActor in
                     await self.handleWindowCapture(windowID: window.windowID)
@@ -318,6 +341,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         openEditor(with: capture)
+    }
+
+    private func captureScrollingRegion(rect: CGRect, cancellation: ScrollingCaptureCancellation) async -> CapturedScreenshot? {
+        guard !isScrollingCaptureInProgress else {
+            AppLogger.info("Ignored duplicate scrolling capture request.")
+            return nil
+        }
+        isScrollingCaptureInProgress = true
+        defer {
+            isScrollingCaptureInProgress = false
+        }
+        return await scrollingCaptureWorkflow.capture(rect: rect, cancellation: cancellation)
     }
 
     private func pinRegion(rect: CGRect, annotations: [OverlayMarkupAnnotation], preCapturedRegion: CapturedScreenshot?) async {

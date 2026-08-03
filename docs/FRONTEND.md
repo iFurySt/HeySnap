@@ -32,4 +32,4 @@ HeySnap 当前的界面由 `apps/macos/HeySnap/` 下的原生 macOS SwiftUI Pref
 make macos-app
 ```
 
-开发阶段统一打开 `~/Applications/HeySnap.app`，保持 Screen Recording 授权和手动 UI 验证路径稳定。UI 或 app 代码变更后，先运行 `make macos-app`，再运行 `make restart-macos-app` 重启安装版；不要只 `open` 激活旧进程，也不要用 `open -n` 强开多个实例。UI 变更至少需要确认该命令可构建，并尽量启动 app 检查 Preference 窗口。
+开发阶段统一打开 `/Applications/HeySnap.app`，保持 Screen Recording 授权和手动 UI 验证路径稳定。UI 或 app 代码变更后，先运行 `make macos-app`，再运行 `make restart-macos-app` 重启安装版；不要只 `open` 激活旧进程，也不要用 `open -n` 强开多个实例。UI 变更至少需要确认该命令可构建，并尽量启动 app 检查 Preference 窗口。

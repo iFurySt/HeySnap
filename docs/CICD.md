@@ -8,7 +8,7 @@ HeySnap 当前有一条最小真实 release workflow，用于按 git tag 构建 
 - 触发方式：push `v*` tag，例如 `v0.1.0`
 - 本地产物入口：`make macos-dmg` 或 `./scripts/build-macos-dmg.sh --version 0.1.0`
 - Sparkle appcast 入口：`make sparkle-appcast VERSION=0.1.0` 或 `./scripts/generate-sparkle-appcast.sh --version 0.1.0`
-- 本地 app 构建入口：`make macos-app`，会生成 `.build/macos/HeySnap.app` 并安装到 `~/Applications/HeySnap.app`。开发阶段统一打开安装路径，以保持 TCC 身份稳定；本地默认签名优先使用 Developer ID Application，找不到时才回退 Apple Development / Mac Developer。
+- 本地 app 构建入口：`make macos-app`，会生成 `.build/macos/HeySnap.app` 并安装到 `/Applications/HeySnap.app`。开发阶段统一打开安装路径，以保持 TCC 身份稳定；本地默认签名优先使用 Developer ID Application，找不到时才回退 Apple Development / Mac Developer。
 - CI 产物路径：`dist/release/heysnap/HeySnap-<version>.dmg` 和 `dist/release/heysnap/appcast.xml`
 - GitHub Release：tag push 后 workflow 会创建或更新同 tag release，并上传 `HeySnap-<version>.dmg` 和 `appcast.xml`。
 - App 内更新：`Info.plist` 的 `SUFeedURL` 指向 `https://github.com/iFurySt/HeySnap/releases/latest/download/appcast.xml`，Sparkle 会从最新 GitHub Release 读取 signed appcast，再下载同 tag 的 DMG。

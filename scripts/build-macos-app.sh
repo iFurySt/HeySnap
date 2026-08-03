@@ -312,7 +312,7 @@ codesign -dv --verbose=2 "${app_dir}" 2>&1 | awk '/Authority=|TeamIdentifier=|Si
 codesign -d -r- "${app_dir}" 2>&1 | sed -n '/designated/p' >&2
 
 if [[ "${install_user_app}" -eq 1 ]]; then
-  install_dir="${HOME}/Applications"
+  install_dir="/Applications"
   install_app_dir="${install_dir}/${app_name}.app"
   mkdir -p "${install_dir}"
   rm -rf "${install_app_dir}"

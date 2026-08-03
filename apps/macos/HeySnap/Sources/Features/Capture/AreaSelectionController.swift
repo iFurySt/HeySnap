@@ -8,6 +8,7 @@ enum CaptureSelection {
     case saveRegion(CGRect, [OverlayMarkupAnnotation], CapturedScreenshot?)
     case pinRegion(CGRect, [OverlayMarkupAnnotation], CapturedScreenshot?)
     case editRegion(CGRect, CapturedScreenshot?)
+    case scrollingCapture(CapturedScreenshot)
     case window(WindowDescriptor)
     case cancelled
 }
@@ -30,7 +31,8 @@ private extension CaptureSelection {
         case .copyRegion,
              .saveRegion,
              .pinRegion,
-             .editRegion:
+             .editRegion,
+             .scrollingCapture:
             return true
         default:
             return false
@@ -45,10 +47,19 @@ private extension CaptureSelection {
 final class AreaSelectionController {
     private var session: AreaSelectionSession?
 
-    func beginSelection(quickMarkupEnabled: Bool = false, screenSnapshot: CapturedScreenshot? = nil, onComplete: @escaping (CaptureSelection) -> Void) {
+    func beginSelection(
+        quickMarkupEnabled: Bool = false,
+        screenSnapshot: CapturedScreenshot? = nil,
+        onScrollingCapture: @escaping (CGRect, ScrollingCaptureCancellation, @escaping (CapturedScreenshot?) -> Void) -> Void = { _, _, completion in completion(nil) },
+        onComplete: @escaping (CaptureSelection) -> Void
+    ) {
         guard session == nil else { return }
 
-        let session = AreaSelectionSession(quickMarkupEnabled: quickMarkupEnabled, screenSnapshot: screenSnapshot) { [weak self] selection in
+        let session = AreaSelectionSession(
+            quickMarkupEnabled: quickMarkupEnabled,
+            screenSnapshot: screenSnapshot,
+            onScrollingCapture: onScrollingCapture
+        ) { [weak self] selection in
             self?.session = nil
             onComplete(selection)
         }
@@ -65,6 +76,7 @@ private final class AreaSelectionSession {
     private let quickMarkupEnabled: Bool
     private let screenSnapshot: CapturedScreenshot?
     private let snapshotScreenFrame: CGRect?
+    private let onScrollingCapture: (CGRect, ScrollingCaptureCancellation, @escaping (CapturedScreenshot?) -> Void) -> Void
     private var windows: [AreaSelectionWindow] = []
     private var views: [AreaSelectionView] = []
     private weak var activeTextEditingView: AreaSelectionView?
@@ -87,6 +99,10 @@ private final class AreaSelectionSession {
     private var hoveredBarTooltipCandidateIndex: Int?
     private var hoveredTooltipBarIndex: Int?
     private var tooltipWorkItem: DispatchWorkItem?
+    private var noticeMessage: String?
+    private var noticeWorkItem: DispatchWorkItem?
+    private var isScrollingCaptureInProgress = false
+    private var scrollingCancellation: ScrollingCaptureCancellation?
     private var pointerDownPoint: CGPoint?
     private var activeMarkupHandle: OverlaySelectionHandle?
     private var resizeMarkupOrigin: CGRect?
@@ -116,10 +132,16 @@ private final class AreaSelectionSession {
     /// Minimum pointer travel, in points, before a press becomes a region drag.
     private let dragThreshold: CGFloat = 4
 
-    init(quickMarkupEnabled: Bool, screenSnapshot: CapturedScreenshot?, onComplete: @escaping (CaptureSelection) -> Void) {
+    init(
+        quickMarkupEnabled: Bool,
+        screenSnapshot: CapturedScreenshot?,
+        onScrollingCapture: @escaping (CGRect, ScrollingCaptureCancellation, @escaping (CapturedScreenshot?) -> Void) -> Void,
+        onComplete: @escaping (CaptureSelection) -> Void
+    ) {
         self.quickMarkupEnabled = quickMarkupEnabled
         self.screenSnapshot = screenSnapshot
         self.snapshotScreenFrame = Self.snapshotScreenFrame(for: screenSnapshot)
+        self.onScrollingCapture = onScrollingCapture
         self.onComplete = onComplete
     }
 
@@ -273,6 +295,10 @@ private final class AreaSelectionSession {
     }
 
     func handleMouseDown(globalPoint: CGPoint, clickCount: Int = 1) {
+        guard !isScrollingCaptureInProgress else {
+            refreshOverlays()
+            return
+        }
         if let markupRect {
             pointerDownPoint = globalPoint
             if let propertyBarRect = propertyBarRectGlobal(), propertyBarRect.contains(globalPoint) {
@@ -543,6 +569,12 @@ private final class AreaSelectionSession {
     }
 
     func cancel() {
+        if isScrollingCaptureInProgress {
+            scrollingCancellation?.cancel()
+            isScrollingCaptureInProgress = false
+            scrollingCancellation = nil
+            setOverlayInteractionEnabled(true)
+        }
         finish(.cancelled)
     }
 
@@ -641,6 +673,16 @@ private final class AreaSelectionSession {
             markupTool = .highlighter
             setPropertyTool(.highlighter)
             refreshOverlays()
+        case .scrolling:
+            guard !isScrollingCaptureInProgress else {
+                showNotice("Scrolling capture is already running.")
+                refreshOverlays()
+                return
+            }
+            if let markupRect {
+                commitActiveTextIfNeeded()
+                beginScrollingCapture(rect: markupRect.integral)
+            }
         case .pin:
             if let markupRect {
                 commitActiveTextIfNeeded()
@@ -820,6 +862,51 @@ private final class AreaSelectionSession {
         }
         tooltipWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: item)
+    }
+
+    private func showNotice(_ message: String) {
+        noticeWorkItem?.cancel()
+        noticeMessage = message
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.noticeMessage == message else { return }
+            self.noticeMessage = nil
+            self.refreshOverlays()
+        }
+        noticeWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4, execute: item)
+    }
+
+    private func beginScrollingCapture(rect: CGRect) {
+        isScrollingCaptureInProgress = true
+        let cancellation = ScrollingCaptureCancellation()
+        scrollingCancellation = cancellation
+        setOverlayInteractionEnabled(false)
+        propertyTool = nil
+        selectedMarkupAnnotationID = nil
+        showNotice("Scrolling capture in progress...")
+        refreshOverlays()
+
+        onScrollingCapture(rect, cancellation) { [weak self] capture in
+            Task { @MainActor in
+                guard let self, self.isScrollingCaptureInProgress else { return }
+                self.isScrollingCaptureInProgress = false
+                self.scrollingCancellation = nil
+                if let capture {
+                    self.finish(.scrollingCapture(capture))
+                } else {
+                    self.setOverlayInteractionEnabled(true)
+                    self.showNotice("Could not detect scrolling movement.")
+                    self.refreshOverlays()
+                }
+            }
+        }
+    }
+
+    private func setOverlayInteractionEnabled(_ isEnabled: Bool) {
+        for window in windows {
+            window.ignoresMouseEvents = !isEnabled
+        }
     }
 
     private func updateSelectedAnnotationStyle() {
@@ -1089,8 +1176,12 @@ private final class AreaSelectionSession {
         hoveredTooltipBarIndex
     }
 
+    var currentNoticeMessage: String? {
+        noticeMessage
+    }
+
     private func defaultBarRect(near rect: CGRect) -> CGRect {
-        let size = CGSize(width: 640, height: 48)
+        let size = CGSize(width: 690, height: 48)
         let margin: CGFloat = 12
         let screenFrame = NSScreen.screens.first(where: { $0.frame.intersects(rect) })?.frame
             ?? NSScreen.main?.frame
@@ -1743,6 +1834,10 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
            let title = slot.kind.title {
             drawToolbarTooltip(title, anchoredTo: slot.rect, in: rect)
         }
+
+        if let message = session?.currentNoticeMessage {
+            drawOverlayNotice(message, anchoredTo: rect)
+        }
     }
 
     private func drawPropertyBar(in rect: CGRect) {
@@ -2009,6 +2104,43 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
         NSString(string: title).draw(in: textRect, withAttributes: attributes)
     }
 
+    private func drawOverlayNotice(_ message: String, anchoredTo barRect: CGRect) {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: NSColor.white
+        ]
+        let textSize = NSString(string: message).size(withAttributes: attributes)
+        let padding = CGSize(width: 12, height: 7)
+        let maxWidth = min(bounds.width - 16, 360)
+        let noticeSize = CGSize(
+            width: min(maxWidth, ceil(textSize.width + padding.width * 2)),
+            height: ceil(textSize.height + padding.height * 2)
+        )
+        var noticeRect = CGRect(
+            x: barRect.midX - noticeSize.width / 2,
+            y: barRect.maxY + 8,
+            width: noticeSize.width,
+            height: noticeSize.height
+        )
+
+        if noticeRect.maxY > bounds.maxY - 8 {
+            noticeRect.origin.y = barRect.minY - noticeSize.height - 8
+        }
+        noticeRect.origin.x = min(max(noticeRect.minX, bounds.minX + 8), bounds.maxX - noticeSize.width - 8)
+
+        let path = NSBezierPath(roundedRect: noticeRect, xRadius: 8, yRadius: 8)
+        NSColor.black.withAlphaComponent(0.84).setFill()
+        path.fill()
+
+        let textRect = CGRect(
+            x: noticeRect.minX + padding.width,
+            y: noticeRect.minY + padding.height - 1,
+            width: noticeRect.width - padding.width * 2,
+            height: textSize.height
+        )
+        NSString(string: message).draw(in: textRect, withAttributes: attributes)
+    }
+
     private func drawCheckmark(centeredAt center: CGPoint, over color: NSColor) {
         let check = NSBezierPath()
         check.move(to: CGPoint(x: center.x - 4, y: center.y))
@@ -2190,6 +2322,7 @@ private struct QuickMarkupBarSlot {
         case separator
         case mosaic
         case highlight
+        case scrolling
         case pin
         case editor
         case save
@@ -2223,6 +2356,8 @@ private struct QuickMarkupBarSlot {
                 return "checkerboard.rectangle"
             case .highlight:
                 return "inset.filled.rectangle.and.pointer.arrow"
+            case .scrolling:
+                return "rectangle.stack.badge.arrow.down"
             case .pin:
                 return "pin"
             case .editor:
@@ -2267,6 +2402,8 @@ private struct QuickMarkupBarSlot {
                 return "Mosaic"
             case .highlight:
                 return "Highlight"
+            case .scrolling:
+                return "Scrolling Capture"
             case .pin:
                 return "Pin"
             case .editor:
@@ -2308,6 +2445,7 @@ private struct QuickMarkupBarSlot {
         .separator,
         .mosaic,
         .highlight,
+        .scrolling,
         .pin,
         .separator,
         .editor,

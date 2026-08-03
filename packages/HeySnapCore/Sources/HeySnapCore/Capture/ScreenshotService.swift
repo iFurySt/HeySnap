@@ -110,6 +110,11 @@ final class ScreenshotService: ObservableObject {
         }
     }
 
+    func captureScrollingFrame(rect: CGRect) async throws -> CapturedScreenshot {
+        logInfo("Scrolling capture frame requested with rect=\(rect).")
+        return try await captureScreenExcludingCurrentApplication(rect: rect)
+    }
+
     func captureAndSave(windowID: CGWindowID) async {
         status = .capturing
         logInfo("Window capture started with windowID=\(windowID).")
@@ -276,6 +281,61 @@ final class ScreenshotService: ObservableObject {
         throw ScreenshotError.unsupportedOS
     }
 
+    private func captureScreenExcludingCurrentApplication(rect: CGRect) async throws -> CapturedScreenshot {
+        if #available(macOS 26.0, *) {
+            guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
+                hasScreenRecordingPermission = false
+                throw ScreenshotError.screenRecordingPermissionDenied
+            }
+            hasScreenRecordingPermission = true
+
+            guard !rect.isNull, rect.width > 1, rect.height > 1 else {
+                throw ScreenshotError.emptyCaptureRect
+            }
+
+            let content = try await SCShareableContent.excludingDesktopWindows(
+                false,
+                onScreenWindowsOnly: true
+            )
+            let screenFrames = NSScreen.screens.map(\.frame)
+            guard let screenFrame = CaptureCoordinateConverter.dominantScreenFrame(for: rect, screenFrames: screenFrames),
+                  let display = content.displays.first(where: { displayFrame(for: $0, screenFrames: screenFrames) == screenFrame }) else {
+                throw ScreenshotError.displayUnavailable
+            }
+
+            let currentProcessID = NSRunningApplication.current.processIdentifier
+            let excludedApplications = content.applications.filter { $0.processID == currentProcessID }
+            let filter = SCContentFilter(
+                display: display,
+                excludingApplications: excludedApplications,
+                exceptingWindows: []
+            )
+            filter.includeMenuBar = false
+
+            let sourceRect = CGRect(
+                x: rect.minX - screenFrame.minX,
+                y: screenFrame.maxY - rect.maxY,
+                width: rect.width,
+                height: rect.height
+            ).integral
+            let scale = CGFloat(filter.pointPixelScale)
+            let configuration = SCStreamConfiguration()
+            configuration.showsCursor = false
+            configuration.sourceRect = sourceRect
+            configuration.width = Int(sourceRect.width * scale)
+            configuration.height = Int(sourceRect.height * scale)
+
+            logInfo("Calling SCScreenshotManager.captureImage filtered appKitRect=\(rect), sourceRect=\(sourceRect), excludedApps=\(excludedApplications.count).")
+            let image = try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: configuration
+            )
+            return CapturedScreenshot(image: image, scaleFactor: scale)
+        }
+
+        throw ScreenshotError.unsupportedOS
+    }
+
     private func applyWindowBackground(to image: CGImage, windowFrame: CGRect) async throws -> CGImage {
         let preference = windowBackgroundProvider()
         switch preference {
@@ -338,6 +398,14 @@ final class ScreenshotService: ObservableObject {
             fromAppKitRect: rect,
             screenFrames: NSScreen.screens.map(\.frame)
         )
+    }
+
+    private func displayFrame(for display: SCDisplay, screenFrames: [CGRect]) -> CGRect? {
+        screenFrames.first {
+            abs($0.width - display.frame.width) < 0.5
+                && abs($0.height - display.frame.height) < 0.5
+                && abs($0.minX - display.frame.minX) < 0.5
+        }
     }
 
     private func scaleFactor(for image: CGImage, pointRect: CGRect) -> CGFloat {
@@ -446,6 +514,7 @@ enum ScreenshotError: LocalizedError {
     case noOutputFormatSelected
     case webPEncoderUnavailable
     case windowUnavailable
+    case displayUnavailable
     case imageResizeFailed
 
     var errorDescription: String? {
@@ -468,6 +537,8 @@ enum ScreenshotError: LocalizedError {
             return "The WebP encoder is unavailable on this Mac."
         case .windowUnavailable:
             return "The selected window is no longer available to capture."
+        case .displayUnavailable:
+            return "The selected display is no longer available to capture."
         case .imageResizeFailed:
             return "The screenshot could not be resized."
         }

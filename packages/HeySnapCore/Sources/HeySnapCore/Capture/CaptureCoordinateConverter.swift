@@ -17,7 +17,7 @@ enum CaptureCoordinateConverter {
         )
     }
 
-    private static func dominantScreenFrame(for rect: CGRect, screenFrames: [CGRect]) -> CGRect? {
+    static func dominantScreenFrame(for rect: CGRect, screenFrames: [CGRect]) -> CGRect? {
         screenFrames
             .map { screenFrame in
                 (screenFrame, intersectionArea(rect.intersection(screenFrame)))

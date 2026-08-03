@@ -20,11 +20,11 @@ install-macos-app:
 	./scripts/build-macos-app.sh --install-user-app
 
 open-macos-app:
-	open ~/Applications/HeySnap.app
+	open /Applications/HeySnap.app
 
 restart-macos-app:
 	-pkill -x HeySnap
-	open ~/Applications/HeySnap.app
+	open /Applications/HeySnap.app
 
 new-history:
 	@if [ -z "$(SLUG)" ]; then echo "用法: make new-history SLUG=变更名"; exit 1; fi
