@@ -41,6 +41,7 @@ final class ScreenshotEditorWindowController: NSWindowController, NSWindowDelega
     }
 
     func windowWillClose(_ notification: Notification) {
+        (window?.contentViewController as? ScreenshotEditorViewController)?.cancelTextRecognition()
         onClose?(self)
     }
 
@@ -309,6 +310,7 @@ private enum EditorToolbarMetrics {
 
 private enum EditorToolbarItemID {
     static let brand = NSToolbarItem.Identifier("heysnap.editor.brand")
+    static let ocr = NSToolbarItem.Identifier("heysnap.editor.ocr")
     static let primaryActions = NSToolbarItem.Identifier("heysnap.editor.primaryActions")
     static let tools = NSToolbarItem.Identifier("heysnap.editor.tools")
     static let colorAndSize = NSToolbarItem.Identifier("heysnap.editor.colorAndSize")
@@ -564,6 +566,10 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
     private var shapeBar: ShapePropertyBar?
     private var didApplyInitialFit = false
     private var wheelZoomAccumulator: CGFloat = 0
+    private weak var ocrToolbarItem: NSToolbarItem?
+    private var ocrTask: Task<Void, Never>?
+    private let ocrStatusLabel = NSTextField(labelWithString: "")
+    private var ocrNoticeWorkItem: DispatchWorkItem?
 
     private let minimumZoom: CGFloat = 0.12
     private let maximumZoom: CGFloat = 4
@@ -639,8 +645,20 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
         view.addSubview(arrowBar)
         view.addSubview(textBar)
         view.addSubview(shapeBar)
+        ocrStatusLabel.translatesAutoresizingMaskIntoConstraints = false
+        ocrStatusLabel.font = .systemFont(ofSize: 12, weight: .medium)
+        ocrStatusLabel.alignment = .center
+        ocrStatusLabel.drawsBackground = true
+        ocrStatusLabel.backgroundColor = .controlBackgroundColor
+        ocrStatusLabel.wantsLayer = true
+        ocrStatusLabel.layer?.cornerRadius = 6
+        ocrStatusLabel.isHidden = true
+        view.addSubview(ocrStatusLabel)
 
         NSLayoutConstraint.activate([
+            ocrStatusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            ocrStatusLabel.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
+            ocrStatusLabel.heightAnchor.constraint(equalToConstant: 28),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: view.topAnchor),
@@ -698,6 +716,7 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
 
         toolbarItemIdentifiers = [
             EditorToolbarItemID.brand,
+            EditorToolbarItemID.ocr,
             EditorToolbarItemID.primaryActions,
             .space
         ] + [
@@ -750,6 +769,18 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
         switch itemIdentifier {
         case EditorToolbarItemID.brand:
             return viewToolbarItem(identifier: itemIdentifier, label: "HeySnap", view: brandView())
+        case EditorToolbarItemID.ocr:
+            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+            item.label = "OCR"
+            item.paletteLabel = "Recognize Text"
+            item.toolTip = "Recognize screenshot text and copy"
+            item.image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: "OCR")
+            item.target = self
+            item.action = #selector(recognizeText)
+            item.autovalidates = false
+            item.visibilityPriority = .high
+            ocrToolbarItem = item
+            return item
         case EditorToolbarItemID.primaryActions:
             return viewToolbarItem(identifier: itemIdentifier, label: "Copy and Save", view: primaryActionGroupView())
         case EditorToolbarItemID.tools:
@@ -1074,6 +1105,54 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
 
     private var imageCenter: CGPoint {
         CGPoint(x: editorView.bounds.midX, y: editorView.bounds.midY)
+    }
+
+    @objc private func recognizeText() {
+        guard ocrTask == nil else { return }
+        let image = editorView.imageForTextRecognition()
+        ocrToolbarItem?.isEnabled = false
+        showOCRNotice("Recognizing text…", dismiss: false)
+        ocrTask = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try ScreenshotTextRecognizer.recognize(image) }
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            self.ocrTask = nil
+            self.ocrToolbarItem?.isEnabled = true
+            switch result {
+            case .success(let text) where text.isEmpty:
+                self.showOCRNotice("No text found")
+            case .success(let text):
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                if pasteboard.setString(text, forType: .string) {
+                    self.showOCRNotice("Text copied to clipboard")
+                    AppLogger.info("OCR text copied to clipboard.")
+                } else {
+                    self.showOCRNotice("Could not copy text")
+                    AppLogger.error("OCR clipboard write failed.")
+                }
+            case .failure(let error):
+                self.showOCRNotice("Could not recognize text")
+                AppLogger.error("OCR failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func cancelTextRecognition() {
+        ocrTask?.cancel()
+        ocrTask = nil
+        ocrNoticeWorkItem?.cancel()
+    }
+
+    private func showOCRNotice(_ message: String, dismiss: Bool = true) {
+        ocrNoticeWorkItem?.cancel()
+        ocrStatusLabel.stringValue = "  \(message)  "
+        ocrStatusLabel.isHidden = false
+        guard dismiss else { return }
+        let item = DispatchWorkItem { [weak self] in self?.ocrStatusLabel.isHidden = true }
+        ocrNoticeWorkItem = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: item)
     }
 
     @objc private func copyImage() {
@@ -2693,6 +2772,11 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         } else if selectedTool == .crop, let dragStart, let dragCurrent {
             drawCropDraft(normalizedRect(from: dragStart, to: dragCurrent))
         }
+    }
+
+    func imageForTextRecognition() -> CGImage {
+        if let pendingCropRect { return baseImage.cropping(to: pendingCropRect.integral) ?? baseImage }
+        return baseImage
     }
 
     func renderedImage() -> CGImage? {

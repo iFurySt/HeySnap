@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import QuartzCore
 
 /// The outcome of an interactive capture selection session.
 enum CaptureSelection {
@@ -649,8 +650,12 @@ private final class AreaSelectionSession {
     }
 
     private func refreshOverlays() {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
         for view in views {
             view.needsDisplay = true
+            view.displayIfNeeded()
             view.window?.invalidateCursorRects(for: view)
         }
     }
@@ -1418,6 +1423,7 @@ private final class AreaSelectionWindow: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
+        animationBehavior = .none
         level = .screenSaver
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         hidesOnDeactivate = false
@@ -1445,6 +1451,7 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
         self.session = session
         super.init(frame: NSRect(origin: .zero, size: screenFrame.size))
         wantsLayer = true
+        layer?.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "opacity": NSNull()]
     }
 
     @available(*, unavailable)
@@ -1625,11 +1632,6 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
         let activeRect = activeRectInViewCoordinates()
         CaptureSnapshotGeometry.drawBackdrop(session?.showsFrozenDesktop == true ? screenSnapshot : nil, in: bounds, selection: activeRect)
         guard let activeRect else { return }
-
-        if session?.isHighlightingWindow == false && session?.isInMarkupMode != true {
-            NSColor.systemBlue.withAlphaComponent(0.12).setFill()
-            activeRect.fill()
-        }
 
         let border = NSBezierPath(rect: activeRect)
         border.lineWidth = 2
@@ -2252,7 +2254,7 @@ private struct QuickMarkupBarSlot {
             case .highlight:
                 return "inset.filled.rectangle.and.pointer.arrow"
             case .scrolling:
-                return "rectangle.stack.badge.arrow.down"
+                return "arrow.up.and.down"
             case .pin:
                 return "pin"
             case .editor:
