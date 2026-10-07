@@ -11,6 +11,20 @@ struct QuickMarkupPropertyBarLayout {
         CGRect(x: bar.minX + 198 + CGFloat(index) * 32, y: bar.minY + 6, width: 28, height: bar.height - 12)
     }
 
+    static func textControls(in bar: CGRect) -> CGRect {
+        CGRect(x: bar.minX, y: bar.maxY - 42, width: bar.width, height: 42)
+    }
+
+    static func textStyleRect(filled: Bool, in bar: CGRect) -> CGRect {
+        CGRect(x: bar.minX + (filled ? 94 : 10), y: bar.minY + 6, width: 76, height: 26)
+    }
+
+    static func textStyle(at point: CGPoint, in bar: CGRect) -> Bool? {
+        if textStyleRect(filled: false, in: bar).contains(point) { return false }
+        if textStyleRect(filled: true, in: bar).contains(point) { return true }
+        return nil
+    }
+
     func sizeIndex(at point: CGPoint, in bar: CGRect) -> Int? {
         (0..<sizeCount).first { itemRect(at: $0, in: bar).contains(point) }
     }

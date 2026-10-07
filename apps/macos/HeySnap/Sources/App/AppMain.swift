@@ -54,6 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var editorWindowControllers: [ScreenshotEditorWindowController] = []
     private var pinnedWindowControllers: [PinnedScreenshotWindowController] = []
     private var isScrollingCaptureInProgress = false
+    private var isPreparingAreaSnapshot = false
     private lazy var scrollingCaptureWorkflow = ScrollingCaptureWorkflow(
         screenshotService: screenshotService,
         logInfo: AppLogger.info,
@@ -189,9 +190,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await handleScreenCapture()
             }
         case .area:
+            guard !isPreparingAreaSnapshot, !areaSelectionController.isSelecting else { return }
             if settings.postCaptureAction == .quickMarkup {
+                isPreparingAreaSnapshot = true
                 Task { @MainActor in
-                    let snapshot = await screenshotService.captureForEditing()
+                    defer { isPreparingAreaSnapshot = false }
+                    let desktopRect = NSScreen.screens.reduce(CGRect.null) { $0.union($1.frame) }
+                    guard let snapshot = await screenshotService.captureForEditing(rect: desktopRect) else { return }
                     beginAreaSelection(quickMarkupEnabled: true, screenSnapshot: snapshot)
                 }
             } else {
@@ -700,16 +705,12 @@ private enum OverlayMarkupRenderer {
 
         switch annotation.tool {
         case .rectangle:
-            stroke(NSBezierPath(rect: rect), width: lineWidth, color: annotation.color)
+            AnnotationShapeGeometry.draw(.rectangle, in: rect, color: annotation.color, width: lineWidth)
         case .oval:
-            stroke(NSBezierPath(ovalIn: rect), width: lineWidth, color: annotation.color)
+            AnnotationShapeGeometry.draw(.oval, in: rect, color: annotation.color, width: lineWidth)
         case .line:
-            let path = NSBezierPath()
-            path.move(to: start)
-            let control = annotation.control.map { convert($0, region: region, scaleX: scaleX, scaleY: scaleY) }
-                ?? defaultControl(start: start, end: end)
-            path.curve(to: end, controlPoint1: control, controlPoint2: control)
-            stroke(path, width: lineWidth, color: annotation.color)
+            let control = annotation.control.map { convert($0, region: region, scaleX: scaleX, scaleY: scaleY) } ?? defaultControl(start: start, end: end)
+            AnnotationLineRenderer.draw(start: start, control: control, end: end, color: annotation.color, width: lineWidth)
         case .arrow:
             let control = annotation.control.map { convert($0, region: region, scaleX: scaleX, scaleY: scaleY) }
                 ?? defaultControl(start: start, end: end)
@@ -717,28 +718,7 @@ private enum OverlayMarkupRenderer {
         case .highlighter:
             drawSpotlight(annotation, rect: rect, imageSize: imageSize)
         case .text:
-            let textRect = rect.width > 1 && rect.height > 1 ? rect : CGRect(x: start.x, y: start.y, width: 140 * scaleX, height: 42 * scaleY)
-            let path = NSBezierPath(roundedRect: textRect, xRadius: 7 * scaleX, yRadius: 7 * scaleY)
-            annotation.color.withAlphaComponent(0.12).setFill()
-            path.fill()
-            stroke(path, width: lineWidth * 0.7, color: annotation.color)
-            guard !annotation.text.isEmpty else { break }
-            let font = NSFont(name: "PingFangSC-Regular", size: annotation.fontSize * max(scaleX, scaleY))
-                ?? NSFont.systemFont(ofSize: annotation.fontSize * max(scaleX, scaleY), weight: .regular)
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.alignment = .center
-            let lineHeight = ceil(font.ascender - font.descender + font.leading)
-            let drawRect = CGRect(
-                x: textRect.minX + 14 * scaleX,
-                y: textRect.midY - lineHeight / 2,
-                width: max(1, textRect.width - 28 * scaleX),
-                height: lineHeight
-            )
-            annotation.text.draw(in: drawRect, withAttributes: [
-                .font: font,
-                .foregroundColor: annotation.color,
-                .paragraphStyle: paragraph
-            ])
+            AnnotationTextRenderer.draw(annotation.text, in: rect, color: annotation.color, fontSize: annotation.fontSize, fillColor: annotation.textFillColor, scale: max(scaleX, scaleY))
         case .blur:
             drawMosaic(in: rect, from: baseImage, intensity: annotation.mosaicIntensity)
         case .select:

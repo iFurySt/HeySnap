@@ -261,7 +261,7 @@ private struct EditorPreferences: Codable {
     var lineWidth: CGFloat = AnnotationDefaults.lineWidth
     var arrowStyle: String = "single"
     var arrowCurved: Bool = false
-    var textFontSize: CGFloat = 12
+    var textFontSize: CGFloat = AnnotationDefaults.textFontSize
     var textFilled: Bool = false
     var textColorHex: String = AnnotationDefaults.colorHex
     var textFillColorHex: String = AnnotationDefaults.colorHex
@@ -1594,229 +1594,6 @@ private enum EditorTool: String, CaseIterable {
 }
 
 
-private enum EditorAnnotationKind {
-    case arrow(control: CGPoint)
-    case text(String)
-    case rectangle
-    case oval
-    case line(control: CGPoint)
-    case highlighter
-    case blur}
-
-private struct EditorAnnotation {
-    let id: UUID
-    var kind: EditorAnnotationKind
-    var start: CGPoint
-    var end: CGPoint
-    var color: NSColor
-    var lineWidth: CGFloat
-    var arrowStyle: AnnotationArrowStyle
-    // When true, an arrow renders as a circular arc through start/mid/end;
-    // otherwise it stays a straight (quadratic) shaft.
-    var arrowCurved: Bool
-    var textFontSize: CGFloat
-    var textFillColor: NSColor
-    var textStrokeColor: NSColor?
-
-    init(
-        kind: EditorAnnotationKind,
-        start: CGPoint,
-        end: CGPoint,
-        color: NSColor,
-        lineWidth: CGFloat,
-        arrowStyle: AnnotationArrowStyle = .single,
-        arrowCurved: Bool = false,
-        textFontSize: CGFloat = 12,
-        textFillColor: NSColor = .clear,
-        textStrokeColor: NSColor? = .controlAccentColor
-    ) {
-        self.id = UUID()
-        self.kind = kind
-        self.start = start
-        self.end = end
-        self.color = color
-        self.lineWidth = lineWidth
-        self.arrowStyle = arrowStyle
-        self.arrowCurved = arrowCurved
-        self.textFontSize = textFontSize
-        self.textFillColor = textFillColor
-        self.textStrokeColor = textStrokeColor
-    }
-
-    var rect: CGRect {
-        if let geometry = arrowGeometry {
-            return geometry.bounds
-        } else if case .line(let control) = kind {
-            let minX = min(start.x, control.x, end.x)
-            let minY = min(start.y, control.y, end.y)
-            let maxX = max(start.x, control.x, end.x)
-            let maxY = max(start.y, control.y, end.y)
-            return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-        }
-
-        return CGRect(
-            x: min(start.x, end.x),
-            y: min(start.y, end.y),
-            width: abs(start.x - end.x),
-            height: abs(start.y - end.y)
-        )
-    }
-
-    func offsetBy(dx: CGFloat, dy: CGFloat) -> EditorAnnotation {
-        var copy = self
-        copy.start.x += dx
-        copy.start.y += dy
-        copy.end.x += dx
-        copy.end.y += dy
-        if case .arrow(let control) = copy.kind {
-            copy.kind = .arrow(control: AnnotationArrowGeometry(start: start, control: control, end: end).offsetBy(dx: dx, dy: dy).control)
-        } else if case .line(let control) = copy.kind {
-            copy.kind = .line(control: CGPoint(x: control.x + dx, y: control.y + dy))
-        }
-        return copy
-    }
-
-    func arrowControlPoint() -> CGPoint? {
-        guard case .arrow(let control) = kind else {
-            return nil
-        }
-        return control
-    }
-
-    func lineControlPoint() -> CGPoint? {
-        guard case .line(let control) = kind else {
-            return nil
-        }
-        return control
-    }
-
-    var isTextAnnotation: Bool {
-        if case .text = kind {
-            return true
-        }
-        return false
-    }
-
-    var isResizableShape: Bool {
-        switch kind {
-        case .rectangle, .oval:
-            return true
-        default:
-            return false
-        }
-    }
-
-    var isLineAnnotation: Bool {
-        if case .line = kind {
-            return true
-        }
-        return false
-    }
-
-    var arrowGeometry: AnnotationArrowGeometry? {
-        guard case .arrow(let control) = kind else { return nil }
-        return AnnotationArrowGeometry(start: start, control: control, end: end)
-    }
-
-    func arrowCurveMidpoint() -> CGPoint? { arrowGeometry?.midpoint }
-
-    func lineCurveMidpoint() -> CGPoint? {
-        guard case .line(let control) = kind else {
-            return nil
-        }
-        return CGPoint(
-            x: 0.25 * start.x + 0.5 * control.x + 0.25 * end.x,
-            y: 0.25 * start.y + 0.5 * control.y + 0.25 * end.y
-        )
-    }
-
-    func updatingArrowHandle(_ handle: AnnotationArrowHandle, to point: CGPoint) -> EditorAnnotation {
-        guard let geometry = arrowGeometry?.updating(handle, to: point) else { return self }
-        var copy = self
-        copy.start = geometry.start
-        copy.end = geometry.end
-        copy.kind = .arrow(control: geometry.control)
-        return copy
-    }
-
-    func updatingLineHandle(_ handle: AnnotationArrowHandle, to point: CGPoint) -> EditorAnnotation {
-        var copy = self
-        switch handle {
-        case .start:
-            copy.start = point
-        case .control:
-            let control = CGPoint(
-                x: 2 * point.x - 0.5 * (copy.start.x + copy.end.x),
-                y: 2 * point.y - 0.5 * (copy.start.y + copy.end.y)
-            )
-            copy.kind = .line(control: control)
-        case .end:
-            copy.end = point
-        }
-        return copy
-    }
-
-    func updatingRect(_ rect: CGRect) -> EditorAnnotation {
-        var copy = self
-        copy.start = rect.origin
-        copy.end = CGPoint(x: rect.maxX, y: rect.maxY)
-        return copy
-    }
-
-    func hasSameGeometry(as other: EditorAnnotation) -> Bool {
-        guard start == other.start, end == other.end else {
-            return false
-        }
-
-        switch (kind, other.kind) {
-        case (.arrow(let lhs), .arrow(let rhs)):
-            return lhs == rhs
-        case (.line(let lhs), .line(let rhs)):
-            return lhs == rhs
-        default:
-            return true
-        }
-    }
-}
-
-// The eight resize handles of a crop selection (4 corners + 4 edge midpoints).
-private enum CropHandle: CaseIterable {
-    case topLeft, top, topRight, right, bottomRight, bottom, bottomLeft, left
-
-    // Anchor point of the handle within `rect` (view is flipped: y increases down).
-    func point(in rect: CGRect) -> CGPoint {
-        switch self {
-        case .topLeft: return CGPoint(x: rect.minX, y: rect.minY)
-        case .top: return CGPoint(x: rect.midX, y: rect.minY)
-        case .topRight: return CGPoint(x: rect.maxX, y: rect.minY)
-        case .right: return CGPoint(x: rect.maxX, y: rect.midY)
-        case .bottomRight: return CGPoint(x: rect.maxX, y: rect.maxY)
-        case .bottom: return CGPoint(x: rect.midX, y: rect.maxY)
-        case .bottomLeft: return CGPoint(x: rect.minX, y: rect.maxY)
-        case .left: return CGPoint(x: rect.minX, y: rect.midY)
-        }
-    }
-
-    var movesLeftEdge: Bool { self == .topLeft || self == .left || self == .bottomLeft }
-    var movesRightEdge: Bool { self == .topRight || self == .right || self == .bottomRight }
-    var movesTopEdge: Bool { self == .topLeft || self == .top || self == .topRight }
-    var movesBottomEdge: Bool { self == .bottomLeft || self == .bottom || self == .bottomRight }
-
-    // Public directional resize cursor for this handle (macOS 15+).
-    var resizeCursor: NSCursor {
-        switch self {
-        case .topLeft: return .frameResize(position: .topLeft, directions: .all)
-        case .top: return .frameResize(position: .top, directions: .all)
-        case .topRight: return .frameResize(position: .topRight, directions: .all)
-        case .right: return .frameResize(position: .right, directions: .all)
-        case .bottomRight: return .frameResize(position: .bottomRight, directions: .all)
-        case .bottom: return .frameResize(position: .bottom, directions: .all)
-        case .bottomLeft: return .frameResize(position: .bottomLeft, directions: .all)
-        case .left: return .frameResize(position: .left, directions: .all)
-        }
-    }
-}
-
 private struct EditorDocumentState {
     var image: CGImage
     var annotations: [EditorAnnotation]
@@ -1828,100 +1605,6 @@ private struct EditorDocumentState {
         self.image = image
         self.annotations = annotations
         self.restoreCropRect = restoreCropRect
-    }
-}
-
-private final class InlineTextAnnotationView: NSTextView {
-    var onCommit: (() -> Void)?
-    var onCancel: (() -> Void)?
-    var onEditingLayoutChange: (() -> Void)?
-    let selectionRingLayer = CAShapeLayer()
-    var customCaretColor: NSColor = .labelColor {
-        didSet { needsDisplay = true }
-    }
-
-    private var customCaretVisible = true
-    private var customCaretTimer: Timer?
-
-    deinit {
-        customCaretTimer?.invalidate()
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if window == nil {
-            customCaretTimer?.invalidate()
-            customCaretTimer = nil
-        } else if customCaretTimer == nil {
-            customCaretTimer = Timer.scheduledTimer(withTimeInterval: 0.55, repeats: true) { [weak self] _ in
-                guard let self else { return }
-                self.customCaretVisible.toggle()
-                self.needsDisplay = true
-            }
-        }
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        drawCustomEmptyCaretIfNeeded()
-    }
-
-    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
-        onEditingLayoutChange?()
-    }
-
-    override func unmarkText() {
-        super.unmarkText()
-        onEditingLayoutChange?()
-    }
-
-    override func insertText(_ insertString: Any, replacementRange: NSRange) {
-        super.insertText(insertString, replacementRange: replacementRange)
-        onEditingLayoutChange?()
-    }
-
-    override func setSelectedRange(_ charRange: NSRange) {
-        super.setSelectedRange(charRange)
-        onEditingLayoutChange?()
-    }
-
-    override func doCommand(by selector: Selector) {
-        if selector == #selector(cancelOperation(_:)) {
-            onCancel?()
-            return
-        }
-
-        if selector == #selector(insertNewline(_:)) || selector == #selector(insertNewlineIgnoringFieldEditor(_:)) {
-            let flags = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
-            if flags.contains(.command) {
-                onCommit?()
-                return
-            }
-        }
-
-        super.doCommand(by: selector)
-    }
-
-    private func drawCustomEmptyCaretIfNeeded() {
-        guard string.isEmpty,
-              selectedRange().length == 0,
-              window?.firstResponder === self,
-              customCaretVisible else {
-            return
-        }
-
-        let font = font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        let lineHeight = ceil(font.ascender - font.descender + font.leading)
-        let caretWidth: CGFloat = 1.5
-        let rect = CGRect(
-            x: bounds.midX - caretWidth / 2,
-            y: textContainerInset.height,
-            width: caretWidth,
-            height: lineHeight
-        )
-        customCaretColor.setFill()
-        NSBezierPath(rect: rect).fill()
     }
 }
 
@@ -1937,7 +1620,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     var lineWidth: CGFloat = AnnotationDefaults.lineWidth
     var currentArrowStyle: AnnotationArrowStyle = .single
     var currentArrowCurved: Bool = false
-    var currentTextFontSize: CGFloat = 12
+    var currentTextFontSize: CGFloat = AnnotationDefaults.textFontSize
     var currentTextFillColor: NSColor = .clear
     var currentTextStrokeColor: NSColor? = .controlAccentColor
     var onSelectionChange: ((EditorTool) -> Void)?
@@ -1995,8 +1678,8 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     }
     private var isMovingPendingCrop = false
     private var pendingCropMoveOrigin: CGRect?
-    private var activeCropHandle: CropHandle?
-    private var activeShapeHandle: CropHandle?
+    private var activeAnnotationShapeHandle: AnnotationShapeHandle?
+    private var activeShapeHandle: AnnotationShapeHandle?
     private var shapeResizeOrigin: CGRect?
     private var isMovingAnnotation = false
     private var isColorPicking = false {
@@ -2010,7 +1693,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     private var colorPickCurrentColor: NSColor?
     private var trackingArea: NSTrackingArea?
     private var activeTextAnnotationID: UUID?
-    private var activeTextEditor: InlineTextAnnotationView?
+    private var activeTextEditor: AnnotationInlineTextView?
     private var activeTextEditorInitialState: EditorDocumentState?
     private var suppressTextInsertionOnMouseUp = false
     private var panLastPoint: CGPoint?
@@ -2345,9 +2028,10 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         editSelectedText(name: "Text Style") { annotation in
             if filled {
                 let baseColor = annotation.textFillColor.alphaComponent > 0 ? annotation.textFillColor : annotation.color
-                annotation.textFillColor = baseColor
+                let style = AnnotationTextRenderer.style(filled: true, color: annotation.color, fillColor: annotation.textFillColor)
+                annotation.textFillColor = style.fill
                 annotation.textStrokeColor = .controlAccentColor
-                annotation.color = .white
+                annotation.color = style.color
                 currentTextFillColor = baseColor
                 currentTextStrokeColor = baseColor
                 currentColor = .white
@@ -2356,8 +2040,9 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
                 editorPreferences.textColorHex = NSColor.white.editorHexString
             } else {
                 let baseColor = annotation.textFillColor.alphaComponent > 0 ? annotation.textFillColor : annotation.color
-                annotation.color = baseColor
-                annotation.textFillColor = .clear
+                let style = AnnotationTextRenderer.style(filled: false, color: annotation.color, fillColor: annotation.textFillColor)
+                annotation.color = style.color
+                annotation.textFillColor = style.fill
                 annotation.textStrokeColor = .controlAccentColor
                 currentTextFillColor = .clear
                 currentTextStrokeColor = .controlAccentColor
@@ -2399,57 +2084,13 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         syncTextEditorContainer(editor)
     }
 
-    private func updateTextEditorSelectionRing(_ editor: InlineTextAnnotationView, annotation: EditorAnnotation) {
-        let ringGap = 4 / currentMagnification
-        let ringWidth = 1.8 / currentMagnification
-        let layerFrame = editor.bounds.insetBy(dx: -ringGap - ringWidth, dy: -ringGap - ringWidth)
-        let ringRect = CGRect(
-            x: ringWidth,
-            y: ringWidth,
-            width: max(1, layerFrame.width - ringWidth * 2),
-            height: max(1, layerFrame.height - ringWidth * 2)
-        )
-        let ringPath = NSBezierPath(
-            roundedRect: ringRect,
-            xRadius: textCornerRadius + ringGap,
-            yRadius: textCornerRadius + ringGap
-        )
-        editor.wantsLayer = true
-        editor.layer?.masksToBounds = false
-        editor.selectionRingLayer.frame = layerFrame
-        editor.selectionRingLayer.path = ringPath.cgPath
-        editor.selectionRingLayer.fillColor = NSColor.clear.cgColor
-        editor.selectionRingLayer.strokeColor = NSColor.controlAccentColor.cgColor
-        editor.selectionRingLayer.lineWidth = ringWidth
-        if editor.selectionRingLayer.superlayer == nil {
-            editor.layer?.addSublayer(editor.selectionRingLayer)
-        }
+    private func updateTextEditorSelectionRing(_ editor: AnnotationInlineTextView, annotation: EditorAnnotation) {
+        AnnotationTextRenderer.updateSelectionRing(editor, scale: sourceScaleFactor, magnification: currentMagnification)
     }
 
     private func applyTextEditorAttributes(_ editor: NSTextView, annotation: EditorAnnotation) {
-        let font = textFont(size: annotation.textFontSize)
-        let paragraph = centeredParagraphStyle()
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: annotation.color,
-            .paragraphStyle: paragraph
-        ]
-        editor.font = font
-        editor.alignment = .center
-        editor.textColor = annotation.color
-        editor.insertionPointColor = annotation.color
-        if let inlineEditor = editor as? InlineTextAnnotationView {
-            inlineEditor.customCaretColor = annotation.color
-        }
-        editor.typingAttributes = attributes
-        let range = NSRange(location: 0, length: (editor.string as NSString).length)
-        if range.length > 0 {
-            editor.textStorage?.setAttributes(attributes, range: range)
-        }
-
-        let textHeight = textLineHeight(for: font)
-        let verticalInset = max(0, (editor.bounds.height - textHeight) / 2)
-        editor.textContainerInset = NSSize(width: textInsets.left, height: verticalInset)
+        guard let editor = editor as? AnnotationInlineTextView else { return }
+        AnnotationTextRenderer.configure(editor, color: annotation.color, fillColor: annotation.textFillColor, fontSize: annotation.textFontSize, scale: sourceScaleFactor, magnification: currentMagnification)
     }
 
     private func textLineHeight(for font: NSFont) -> CGFloat {
@@ -2501,7 +2142,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
             addCursor(pendingCropRect, .editorMove)
 
             let radius = cropHandleHitRadius
-            for handle in CropHandle.allCases {
+            for handle in AnnotationShapeHandle.allCases {
                 let anchor = handle.point(in: pendingCropRect)
                 let handleRect = CGRect(
                     x: anchor.x - radius,
@@ -2538,8 +2179,8 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
                   annotation.isResizableShape {
             addShapeStrokeCursorRects(for: annotation, addCursor: addCursor)
             let radius = cropHandleHitRadius
-            for handle in CropHandle.allCases {
-                let anchor = handle.point(in: annotation.rect)
+            for handle in AnnotationShapeHandle.allCases {
+                let anchor = handle.point(in: annotation.rect, kind: annotation.shapeKind)
                 let handleRect = CGRect(
                     x: anchor.x - radius,
                     y: anchor.y - radius,
@@ -2610,7 +2251,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
             activeArrowHandle = handleHit.handle
             isCropSelecting = false
             isMovingPendingCrop = false
-            activeCropHandle = nil
+            activeAnnotationShapeHandle = nil
             suppressTextInsertionOnMouseUp = true
             panLastPoint = nil
             dragStartAnnotations = annotations
@@ -2625,7 +2266,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
             activeArrowHandle = handleHit.handle
             isCropSelecting = false
             isMovingPendingCrop = false
-            activeCropHandle = nil
+            activeAnnotationShapeHandle = nil
             suppressTextInsertionOnMouseUp = true
             panLastPoint = nil
             dragStartAnnotations = annotations
@@ -2636,13 +2277,13 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         if let selectedID = selectedAnnotationID,
            let annotation = annotations.first(where: { $0.id == selectedID }),
            annotation.isResizableShape,
-           let handle = cropHandle(at: point, in: annotation.rect) {
+           let handle = AnnotationShapeGeometry.hitHandle(at: point, rect: annotation.rect, magnification: currentMagnification, kind: annotation.shapeKind) {
             activeShapeHandle = handle
             shapeResizeOrigin = annotation.rect
             activeArrowHandle = nil
             isCropSelecting = false
             isMovingPendingCrop = false
-            activeCropHandle = nil
+            activeAnnotationShapeHandle = nil
             isMovingAnnotation = false
             suppressTextInsertionOnMouseUp = true
             panLastPoint = nil
@@ -2659,7 +2300,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
             activeArrowHandle = nil
             isCropSelecting = false
             isMovingPendingCrop = false
-            activeCropHandle = nil
+            activeAnnotationShapeHandle = nil
             isMovingAnnotation = false
             suppressTextInsertionOnMouseUp = true
             panLastPoint = nil
@@ -2676,7 +2317,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
             activeArrowHandle = nil
             isCropSelecting = false
             isMovingPendingCrop = false
-            activeCropHandle = nil
+            activeAnnotationShapeHandle = nil
             isMovingAnnotation = true
             suppressTextInsertionOnMouseUp = true
             panLastPoint = nil
@@ -2702,7 +2343,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         if selectedTool == .select {
             // Grabbing a resize handle of the pending selection resizes it.
             if let pendingCropRect, let handle = cropHandle(at: point, in: pendingCropRect) {
-                activeCropHandle = handle
+                activeAnnotationShapeHandle = handle
                 pendingCropMoveOrigin = pendingCropRect
                 isMovingPendingCrop = false
                 isCropSelecting = false
@@ -2758,7 +2399,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         let point = clampedPoint(from: event)
         isConstrainedDrawing = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.shift)
 
-        if let handle = activeCropHandle, let origin = pendingCropMoveOrigin {
+        if let handle = activeAnnotationShapeHandle, let origin = pendingCropMoveOrigin {
             pendingCropRect = resizedRect(origin, handle: handle, to: point)
             needsDisplay = true
             return
@@ -2767,7 +2408,8 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         if let handle = activeShapeHandle,
            let origin = shapeResizeOrigin,
            let selectedAnnotationID {
-            let rect = resizedShapeRect(origin, handle: handle, to: point, constrained: isConstrainedDrawing)
+            let kind = annotations.first(where: { $0.id == selectedAnnotationID })?.shapeKind ?? .rectangle
+            let rect = AnnotationShapeGeometry.resized(origin, handle: handle, to: point, within: bounds, constrained: isConstrainedDrawing, kind: kind)
             annotations = annotations.map { annotation in
                 annotation.id == selectedAnnotationID ? annotation.updatingRect(rect) : annotation
             }
@@ -2862,7 +2504,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
             isMovingPendingCrop = false
             isMovingAnnotation = false
             pendingCropMoveOrigin = nil
-            activeCropHandle = nil
+            activeAnnotationShapeHandle = nil
             activeShapeHandle = nil
             shapeResizeOrigin = nil
             panLastPoint = nil
@@ -2871,7 +2513,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
             suppressTextInsertionOnMouseUp = false
         }
 
-        if activeCropHandle != nil {
+        if activeAnnotationShapeHandle != nil {
             return
         }
 
@@ -3186,15 +2828,9 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         case .line(let control):
             drawCurvedLine(start: annotation.start, control: control, end: annotation.end, color: annotation.color, width: annotation.lineWidth)
         case .rectangle:
-            let path = NSBezierPath(rect: annotation.rect)
-            annotation.color.setStroke()
-            path.lineWidth = annotation.lineWidth
-            path.stroke()
+            AnnotationShapeGeometry.draw(.rectangle, in: annotation.rect, color: annotation.color, width: annotation.lineWidth)
         case .oval:
-            let path = NSBezierPath(ovalIn: annotation.rect)
-            annotation.color.setStroke()
-            path.lineWidth = annotation.lineWidth
-            path.stroke()
+            AnnotationShapeGeometry.draw(.oval, in: annotation.rect, color: annotation.color, width: annotation.lineWidth)
         case .highlighter:
             annotation.color.withAlphaComponent(0.34).setFill()
             annotation.rect.fill()
@@ -3262,14 +2898,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     }
 
     private func drawCurvedLine(start: CGPoint, control: CGPoint, end: CGPoint, color: NSColor, width: CGFloat) {
-        let cubic = cubicControls(start: start, control: control, end: end)
-        color.setStroke()
-        let path = NSBezierPath()
-        path.lineWidth = width
-        path.lineCapStyle = .round
-        path.move(to: start)
-        path.curve(to: end, controlPoint1: cubic.control1, controlPoint2: cubic.control2)
-        path.stroke()
+        AnnotationLineRenderer.draw(start: start, control: control, end: end, color: color, width: width)
     }
 
     private func drawArrowHandles(for annotation: EditorAnnotation) {
@@ -3280,17 +2909,15 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     }
 
     private func drawLineHandles(for annotation: EditorAnnotation) {
-        guard let midpoint = annotation.lineCurveMidpoint() else {
-            return
+        guard let geometry = annotation.lineGeometry else { return }
+        for (_, point) in geometry.handles {
+            AnnotationArrowGeometry.drawHandle(at: point, magnification: currentMagnification)
         }
-        drawEditorHandle(at: annotation.start)
-        drawEditorHandle(at: midpoint)
-        drawEditorHandle(at: annotation.end)
     }
 
     private func drawShapeHandles(for annotation: EditorAnnotation) {
-        for handle in CropHandle.allCases {
-            drawEditorHandle(at: handle.point(in: annotation.rect))
+        for handle in AnnotationShapeHandle.allCases {
+            drawEditorHandle(at: handle.point(in: annotation.rect, kind: annotation.shapeKind))
         }
     }
 
@@ -3301,65 +2928,20 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         AnnotationArrowGeometry.drawHandle(at: point, magnification: currentMagnification)
     }
 
-    private func drawText(
-        _ text: String,
-        in rect: CGRect,
-        color: NSColor,
-        fontSize: CGFloat,
-        fillColor: NSColor,
-        strokeColor: NSColor?,
-        selected: Bool
-    ) {
-        let radius = textCornerRadius
-        let box = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-        if fillColor.alphaComponent > 0 {
-            fillColor.setFill()
-            box.fill()
-        }
-        if selected {
-            if strokeColor != nil {
-                let ringGap = 4 / currentMagnification
-                let ringRect = rect.insetBy(dx: -ringGap, dy: -ringGap)
-                let ring = NSBezierPath(roundedRect: ringRect, xRadius: radius + ringGap, yRadius: radius + ringGap)
-                ring.lineWidth = 1.8 / currentMagnification
-                NSColor.controlAccentColor.setStroke()
-                ring.stroke()
-            }
-        }
-
-        guard !text.isEmpty else {
-            return
-        }
-
-        let font = textFont(size: fontSize)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: color,
-            .paragraphStyle: paragraph
-        ]
-        let textHeight = textLineHeight(for: font)
-        let textRect = CGRect(
-            x: rect.minX + textInsets.left,
-            y: rect.midY - textHeight / 2,
-            width: max(1, rect.width - textInsets.horizontal),
-            height: textHeight
-        )
-        text.draw(in: textRect, withAttributes: attributes)
+    private func drawText(_ text: String, in rect: CGRect, color: NSColor, fontSize: CGFloat, fillColor: NSColor, strokeColor: NSColor?, selected: Bool) {
+        AnnotationTextRenderer.draw(text, in: rect, color: color, fontSize: fontSize, fillColor: fillColor, selected: selected && strokeColor != nil, scale: sourceScaleFactor, magnification: currentMagnification)
     }
 
     private var textInsets: NSEdgeInsets {
-        NSEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)
+        NSEdgeInsets(top: 8 * sourceScaleFactor, left: 14 * sourceScaleFactor, bottom: 8 * sourceScaleFactor, right: 14 * sourceScaleFactor)
     }
 
     private var textCornerRadius: CGFloat {
-        8 / currentMagnification
+        8 * sourceScaleFactor
     }
 
     private func textFont(size: CGFloat) -> NSFont {
-        let pointSize = max(8, size * sourceScaleFactor)
-        return NSFont(name: "PingFangSC-Regular", size: pointSize) ?? NSFont.systemFont(ofSize: pointSize, weight: .regular)
+        AnnotationTextRenderer.font(size: size, scale: sourceScaleFactor)
     }
 
     private func centeredParagraphStyle() -> NSParagraphStyle {
@@ -3396,38 +2978,11 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     }
 
     private func textRect(from start: CGPoint, to end: CGPoint, text: String, fontSize: CGFloat) -> CGRect {
-        let rawRect = normalizedRect(from: start, to: end)
-        let contentSize = textBoxSize(for: text, fontSize: fontSize)
-        let minWidth = contentSize.width
-        let minHeight = contentSize.height
-        let hasDraggedSize = rawRect.width >= 4 || rawRect.height >= 4
-        let origin = hasDraggedSize ? rawRect.origin : start
-        let width = min(max(hasDraggedSize ? rawRect.width : minWidth, minWidth), bounds.width)
-        let height = min(max(hasDraggedSize ? rawRect.height : minHeight, minHeight), bounds.height)
-        let x = min(max(origin.x, bounds.minX), bounds.maxX - width)
-        let y = min(max(origin.y, bounds.minY), bounds.maxY - height)
-        return CGRect(x: x, y: y, width: width, height: height)
+        AnnotationTextRenderer.fittedRect(from: start, to: end, text: text, fontSize: fontSize, within: bounds, scale: sourceScaleFactor)
     }
 
     private func textBoxSize(for text: String, fontSize: CGFloat) -> CGSize {
-        let font = textFont(size: fontSize)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .paragraphStyle: paragraph
-        ]
-        let source = text.isEmpty ? " " : text
-        let measured = source.boundingRect(
-            with: NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: attributes
-        ).size
-        let minimumInputWidth: CGFloat = 96
-        return CGSize(
-            width: max(minimumInputWidth, ceil(measured.width) + textInsets.horizontal),
-            height: textLineHeight(for: font) + textInsets.vertical
-        )
+        AnnotationTextRenderer.boxSize(for: text, fontSize: fontSize, scale: sourceScaleFactor)
     }
 
     private func autosizeTextAnnotation(at index: Int) {
@@ -3435,16 +2990,8 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
               case .text(let text) = annotations[index].kind else {
             return
         }
-        let old = annotations[index].rect
-        let size = textBoxSize(for: text, fontSize: annotations[index].textFontSize)
-        let width = min(max(size.width, 1), bounds.width)
-        let height = min(max(size.height, 1), bounds.height)
-        // Keep the origin fixed while typing so the box grows to the right
-        // instead of first dropping down and then recentering.
-        let x = min(max(old.minX, bounds.minX), bounds.maxX - width)
-        let y = min(max(old.minY, bounds.minY), bounds.maxY - height)
-        annotations[index].start = CGPoint(x: x, y: y)
-        annotations[index].end = CGPoint(x: x + width, y: y + height)
+        let rect = AnnotationTextRenderer.autosizedRect(annotations[index].rect, text: text, fontSize: annotations[index].textFontSize, within: bounds, scale: sourceScaleFactor)
+        annotations[index] = annotations[index].updatingRect(rect)
     }
 
     private func beginEditingTextAnnotation(_ id: UUID, selectAll: Bool, initialState: EditorDocumentState? = nil) {
@@ -3457,7 +3004,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         autosizeTextAnnotation(at: index)
         let annotation = annotations[index]
         let editorFrame = annotation.rect
-        let editor = InlineTextAnnotationView(frame: editorFrame)
+        let editor = AnnotationInlineTextView(frame: editorFrame)
         editor.delegate = self
         editor.drawsBackground = false
         editor.isRichText = false
@@ -3501,7 +3048,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         needsDisplay = true
     }
 
-    private func syncActiveTextEditorGeometry(_ editor: InlineTextAnnotationView) {
+    private func syncActiveTextEditorGeometry(_ editor: AnnotationInlineTextView) {
         guard editor === activeTextEditor,
               let id = activeTextAnnotationID,
               let index = annotations.firstIndex(where: { $0.id == id }) else {
@@ -3523,7 +3070,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     }
 
     func textDidChange(_ notification: Notification) {
-        guard let editor = notification.object as? InlineTextAnnotationView,
+        guard let editor = notification.object as? AnnotationInlineTextView,
               editor === activeTextEditor else {
             return
         }
@@ -3626,8 +3173,8 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         path.stroke()
     }
 
-    private func drawCropHandles(_ rect: CGRect) {
-        for handle in CropHandle.allCases {
+    private func drawAnnotationShapeHandles(_ rect: CGRect) {
+        for handle in AnnotationShapeHandle.allCases {
             drawEditorHandle(at: handle.point(in: rect))
         }
     }
@@ -3642,7 +3189,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         // Draw resize handles once the selection has settled (not during the
         // initial marquee drag), so it reads as adjustable.
         if !live {
-            drawCropHandles(rect)
+            drawAnnotationShapeHandles(rect)
         }
 
         // Labels scale with zoom so they stay legible at any level. W: sits above
@@ -3864,18 +3411,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     }
 
     private func normalizedShapeRect(from start: CGPoint, to end: CGPoint) -> CGRect {
-        guard isConstrainedDrawing else {
-            return normalizedRect(from: start, to: end)
-        }
-
-        let dx = end.x - start.x
-        let dy = end.y - start.y
-        let side = min(abs(dx), abs(dy))
-        let constrainedEnd = CGPoint(
-            x: start.x + (dx < 0 ? -side : side),
-            y: start.y + (dy < 0 ? -side : side)
-        )
-        return normalizedRect(from: start, to: constrainedEnd)
+        AnnotationShapeGeometry.normalized(from: start, to: end, constrained: isConstrainedDrawing)
     }
 
     // Slides `rect` back inside `container` without resizing it, so a moved crop
@@ -3892,23 +3428,13 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     private var shapeStrokeHitSlop: CGFloat { 8 / currentMagnification }
 
     private func shapeStrokeHit(_ point: CGPoint, annotation: EditorAnnotation) -> Bool {
-        let rect = annotation.rect
-        let slop = max(shapeStrokeHitSlop, annotation.lineWidth / 2 + shapeStrokeHitSlop / 2)
+        let kind: AnnotationShapeKind
         switch annotation.kind {
-        case .rectangle:
-            return rect.insetBy(dx: -slop, dy: -slop).contains(point)
-                && !rect.insetBy(dx: slop, dy: slop).contains(point)
-        case .oval:
-            guard rect.width > 1, rect.height > 1 else { return false }
-            let nx = (point.x - rect.midX) / max(rect.width / 2, 0.0001)
-            let ny = (point.y - rect.midY) / max(rect.height / 2, 0.0001)
-            let value = nx * nx + ny * ny
-            let outer = 1 + slop / max(min(rect.width, rect.height) / 2, 0.0001)
-            let inner = max(0, 1 - slop / max(min(rect.width, rect.height) / 2, 0.0001))
-            return value <= outer * outer && value >= inner * inner
-        default:
-            return false
+        case .rectangle: kind = .rectangle
+        case .oval: kind = .oval
+        default: return false
         }
+        return AnnotationShapeGeometry.hitStroke(at: point, kind: kind, rect: annotation.rect, width: annotation.lineWidth, magnification: currentMagnification)
     }
 
     private func addShapeStrokeCursorRects(for annotation: EditorAnnotation, addCursor: (CGRect, NSCursor) -> Void) {
@@ -3944,9 +3470,9 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     }
 
     // Returns the handle under `point` for the given selection, if any.
-    private func cropHandle(at point: CGPoint, in rect: CGRect) -> CropHandle? {
+    private func cropHandle(at point: CGPoint, in rect: CGRect) -> AnnotationShapeHandle? {
         let radius = cropHandleHitRadius
-        for handle in CropHandle.allCases {
+        for handle in AnnotationShapeHandle.allCases {
             let anchor = handle.point(in: rect)
             if abs(point.x - anchor.x) <= radius && abs(point.y - anchor.y) <= radius {
                 return handle
@@ -3957,7 +3483,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
 
     // Applies a handle drag to `origin`, moving only the affected edges, keeping
     // a minimum size and clamping to the image bounds.
-    private func resizedRect(_ origin: CGRect, handle: CropHandle, to point: CGPoint) -> CGRect {
+    private func resizedRect(_ origin: CGRect, handle: AnnotationShapeHandle, to point: CGPoint) -> CGRect {
         let minSize: CGFloat = 8
         var minX = origin.minX
         var maxX = origin.maxX
@@ -3975,60 +3501,6 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
-    private func resizedShapeRect(_ origin: CGRect, handle: CropHandle, to point: CGPoint, constrained: Bool) -> CGRect {
-        guard constrained else {
-            return resizedRect(origin, handle: handle, to: point)
-        }
-
-        let px = min(max(point.x, bounds.minX), bounds.maxX)
-        let py = min(max(point.y, bounds.minY), bounds.maxY)
-        let minSize: CGFloat = 8
-        let raw: CGRect
-        switch handle {
-        case .topLeft, .topRight, .bottomRight, .bottomLeft:
-            let anchor: CGPoint
-            let signX: CGFloat
-            let signY: CGFloat
-            switch handle {
-            case .topLeft:
-                anchor = CGPoint(x: origin.maxX, y: origin.maxY)
-                signX = -1; signY = -1
-            case .topRight:
-                anchor = CGPoint(x: origin.minX, y: origin.maxY)
-                signX = 1; signY = -1
-            case .bottomRight:
-                anchor = CGPoint(x: origin.minX, y: origin.minY)
-                signX = 1; signY = 1
-            case .bottomLeft:
-                anchor = CGPoint(x: origin.maxX, y: origin.minY)
-                signX = -1; signY = 1
-            default:
-                fatalError("unreachable")
-            }
-            let side = max(minSize, min(abs(px - anchor.x), abs(py - anchor.y)))
-            raw = CGRect(
-                x: min(anchor.x, anchor.x + signX * side),
-                y: min(anchor.y, anchor.y + signY * side),
-                width: side,
-                height: side
-            )
-        case .top:
-            let side = max(minSize, abs(py - origin.maxY))
-            raw = CGRect(x: origin.midX - side / 2, y: origin.maxY - side, width: side, height: side)
-        case .bottom:
-            let side = max(minSize, abs(py - origin.minY))
-            raw = CGRect(x: origin.midX - side / 2, y: origin.minY, width: side, height: side)
-        case .left:
-            let side = max(minSize, abs(px - origin.maxX))
-            raw = CGRect(x: origin.maxX - side, y: origin.midY - side / 2, width: side, height: side)
-        case .right:
-            let side = max(minSize, abs(px - origin.minX))
-            raw = CGRect(x: origin.minX, y: origin.midY - side / 2, width: side, height: side)
-        }
-
-        return clampedRect(raw, within: bounds)
-    }
-
     private func defaultArrowControlPoint(start: CGPoint, end: CGPoint) -> CGPoint {
         CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
     }
@@ -4044,21 +3516,14 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     private func hitAnnotation(at point: CGPoint) -> UUID? {
         // Tolerance grows with a screen-space slack so thin arrows stay easy to
         // grab even when zoomed out.
-        let screenSlack = 10 / currentMagnification
         for annotation in annotations.reversed() {
             switch annotation.kind {
             case .arrow:
                 if annotation.arrowGeometry?.hit(at: point, width: annotation.lineWidth, curved: annotation.arrowCurved, magnification: currentMagnification) == true {
                     return annotation.id
                 }
-            case .line(let control):
-                let tolerance = max(annotation.lineWidth, 0) + screenSlack
-                let samples = arrowCenterline(start: annotation.start, control: control, end: annotation.end, curved: false)
-                var minDist = CGFloat.greatestFiniteMagnitude
-                for i in 0..<(samples.count - 1) {
-                    minDist = min(minDist, distance(point, toSegmentFrom: samples[i].point, to: samples[i + 1].point))
-                }
-                if minDist <= tolerance {
+            case .line:
+                if annotation.lineGeometry?.hit(at: point, width: annotation.lineWidth, curved: false, magnification: currentMagnification, includesArrowhead: false) == true {
                     return annotation.id
                 }
             case .rectangle, .oval:
@@ -4127,18 +3592,8 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     }
 
     private func hitLineHandle(at point: CGPoint) -> (annotationID: UUID, handle: AnnotationArrowHandle)? {
-        let radius: CGFloat = 11 / currentMagnification
         for annotation in annotations.reversed() {
-            guard let midpoint = annotation.lineCurveMidpoint() else {
-                continue
-            }
-
-            let handles: [(AnnotationArrowHandle, CGPoint)] = [
-                (.start, annotation.start),
-                (.control, midpoint),
-                (.end, annotation.end)
-            ]
-            for (handle, handlePoint) in handles where hypot(point.x - handlePoint.x, point.y - handlePoint.y) <= radius {
+            if let handle = annotation.lineGeometry?.hitHandle(at: point, magnification: currentMagnification) {
                 return (annotation.id, handle)
             }
         }

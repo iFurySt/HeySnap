@@ -3,6 +3,7 @@ import AppKit
 /// Factory defaults shared by Editor and quick markup.
 enum AnnotationDefaults {
     static let colorHex = "#FF3B30"
+    static let textFontSize: CGFloat = 12
     static let lineWidth: CGFloat = 5
     static let quickMarkupLineWidths: [CGFloat] = [2, lineWidth, 7]
 

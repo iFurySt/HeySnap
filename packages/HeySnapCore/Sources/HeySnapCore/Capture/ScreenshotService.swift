@@ -207,7 +207,7 @@ final class ScreenshotService: ObservableObject {
         throw ScreenshotError.unsupportedOS
     }
 
-    private func captureScreen(rect: CGRect, showsCursor: Bool = true) async throws -> CapturedScreenshot {
+    private func captureScreen(rect: CGRect) async throws -> CapturedScreenshot {
         if #available(macOS 26.0, *) {
             guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
                 hasScreenRecordingPermission = false
@@ -220,7 +220,7 @@ final class ScreenshotService: ObservableObject {
             }
 
             let configuration = SCScreenshotConfiguration()
-            configuration.showsCursor = showsCursor
+            configuration.showsCursor = false
             guard let pngType = UTTypeReference("public.png") else {
                 throw ScreenshotError.missingPNGType
             }
@@ -348,7 +348,7 @@ final class ScreenshotService: ObservableObject {
             return ScreenshotWindowBackgroundRenderer.composite(image, over: color)
         case .wallpaper:
             do {
-                let background = try await captureScreen(rawRect: windowFrame.integral, showsCursor: false)
+                let background = try await captureScreen(rawRect: windowFrame.integral)
                 return ScreenshotWindowBackgroundRenderer.composite(image, over: background.image)
             } catch {
                 logError("Window wallpaper background failed: \(error.localizedDescription).")
@@ -357,7 +357,7 @@ final class ScreenshotService: ObservableObject {
         }
     }
 
-    private func captureScreen(rawRect rect: CGRect, showsCursor: Bool = true) async throws -> CapturedScreenshot {
+    private func captureScreen(rawRect rect: CGRect) async throws -> CapturedScreenshot {
         if #available(macOS 26.0, *) {
             guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
                 hasScreenRecordingPermission = false
@@ -370,7 +370,7 @@ final class ScreenshotService: ObservableObject {
             }
 
             let configuration = SCScreenshotConfiguration()
-            configuration.showsCursor = showsCursor
+            configuration.showsCursor = false
             guard let pngType = UTTypeReference("public.png") else {
                 throw ScreenshotError.missingPNGType
             }

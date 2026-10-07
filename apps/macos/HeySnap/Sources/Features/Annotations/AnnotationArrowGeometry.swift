@@ -47,7 +47,7 @@ struct AnnotationArrowGeometry {
         handles.first { hypot(point.x - $0.1.x, point.y - $0.1.y) <= 11 / magnification }?.0
     }
 
-    func hit(at point: CGPoint, width: CGFloat, curved: Bool, magnification: CGFloat = 1) -> Bool {
+    func hit(at point: CGPoint, width: CGFloat, curved: Bool, magnification: CGFloat = 1, includesArrowhead: Bool = true) -> Bool {
         let slack = 10 / magnification
         let samples = AnnotationArrowRenderer.centerline(start: start, control: control, end: end, curved: curved)
         let tolerance = max(width, 0) + slack
@@ -59,6 +59,7 @@ struct AnnotationArrowGeometry {
                 : 0
             if hypot(point.x - a.point.x - t * dx, point.y - a.point.y - t * dy) <= tolerance { return true }
         }
+        guard includesArrowhead else { return false }
         let headReach = max(6, width * 2.4) + slack
         return hypot(point.x - end.x, point.y - end.y) <= headReach
     }

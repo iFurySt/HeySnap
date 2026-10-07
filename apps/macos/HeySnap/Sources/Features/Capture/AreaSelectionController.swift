@@ -46,6 +46,7 @@ private extension CaptureSelection {
 @MainActor
 final class AreaSelectionController {
     private var session: AreaSelectionSession?
+    var isSelecting: Bool { session != nil }
 
     func beginSelection(
         quickMarkupEnabled: Bool = false,
@@ -76,6 +77,7 @@ private final class AreaSelectionSession {
     private let quickMarkupEnabled: Bool
     private let screenSnapshot: CapturedScreenshot?
     private let snapshotScreenFrame: CGRect?
+    private let snapshotWindows: [WindowDescriptor]?
     private let onScrollingCapture: (CGRect, ScrollingCaptureCancellation, @escaping (CapturedScreenshot?) -> Void) -> Void
     private var windows: [AreaSelectionWindow] = []
     private var views: [AreaSelectionView] = []
@@ -111,8 +113,12 @@ private final class AreaSelectionSession {
     private var propertyTool: OverlayMarkupTool?
     private var hoveredPropertyIndex: Int?
     private var currentMarkupColor: NSColor = AnnotationDefaults.color
+    private var currentMarkupAnnotationColor: NSColor = AnnotationDefaults.color
+    private var currentMarkupTextColor: NSColor = AnnotationDefaults.color
     private var currentMarkupLineWidth: CGFloat = AnnotationDefaults.lineWidth
-    private var currentMarkupFontSize: CGFloat = 18
+    private var currentMarkupFontSize: CGFloat = AnnotationDefaults.textFontSize
+    private var currentMarkupTextFillColor: NSColor = .clear
+    private var isConstrainedDrawing = false
     private var currentMosaicIntensity: CGFloat = 0.5
     private var currentHighlightOpacity: CGFloat = 0.5
     private var currentHighlightShape: OverlayHighlightShape = .rectangle
@@ -122,7 +128,10 @@ private final class AreaSelectionSession {
     private var undoStack: [OverlayMarkupSnapshot] = []
     private var redoStack: [OverlayMarkupSnapshot] = []
     private var activeTextAnnotationID: UUID?
+    private var activeTextInitialSnapshot: OverlayMarkupSnapshot?
+    private var activeTextUndoStackCount = 0
     private var activeAnnotationHandle: OverlayAnnotationHandle?
+    private var resizingAnnotationOrigin: OverlayMarkupAnnotation?
     private var movingAnnotationID: UUID?
     private var movingAnnotationOrigin: OverlayMarkupAnnotation?
     private var hasMarkupAnnotations: Bool {
@@ -141,6 +150,7 @@ private final class AreaSelectionSession {
         self.quickMarkupEnabled = quickMarkupEnabled
         self.screenSnapshot = screenSnapshot
         self.snapshotScreenFrame = Self.snapshotScreenFrame(for: screenSnapshot)
+        self.snapshotWindows = screenSnapshot == nil ? nil : WindowEnumerator.onscreenWindows()
         self.onScrollingCapture = onScrollingCapture
         self.onComplete = onComplete
     }
@@ -176,11 +186,10 @@ private final class AreaSelectionSession {
 
     private static func screenSnapshotImage(_ snapshot: CapturedScreenshot?, for screenFrame: CGRect) -> CGImage? {
         guard let snapshot,
-              let snapshotScreenFrame = snapshotScreenFrame(for: snapshot),
-              snapshotScreenFrame == screenFrame else {
+              let snapshotScreenFrame = snapshotScreenFrame(for: snapshot) else {
             return nil
         }
-        return snapshot.image
+        return CaptureSnapshotGeometry.crop(snapshot.image, sourceRect: snapshotScreenFrame, to: screenFrame)
     }
 
     private static func snapshotScreenFrame(for snapshot: CapturedScreenshot?) -> CGRect? {
@@ -253,9 +262,7 @@ private final class AreaSelectionSession {
 
     func markupPropertyBarRect(in screenFrame: CGRect) -> CGRect? {
         guard propertyTool != nil, let markupBarRect else { return nil }
-        let size = propertyTool?.usesStrokeWidthDots == true
-            ? QuickMarkupPropertyBarLayout(sizeCount: AnnotationDefaults.quickMarkupLineWidths.count).size
-            : CGSize(width: 330, height: 42)
+        let size = propertyBarSize
         let gap: CGFloat = 8
         let globalScreenFrame = NSScreen.screens.first(where: { $0.frame.intersects(markupBarRect) })?.frame ?? screenFrame
         let x = min(max(markupBarRect.midX - size.width / 2, globalScreenFrame.minX + 8), globalScreenFrame.maxX - size.width - 8)
@@ -296,7 +303,8 @@ private final class AreaSelectionSession {
         return annotation.inViewCoordinates(screenFrame: screenFrame)
     }
 
-    func handleMouseDown(globalPoint: CGPoint, clickCount: Int = 1) {
+    func handleMouseDown(globalPoint: CGPoint, clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = []) {
+        isConstrainedDrawing = modifiers.contains(.shift)
         guard !isScrollingCaptureInProgress else {
             refreshOverlays()
             return
@@ -316,22 +324,24 @@ private final class AreaSelectionSession {
                 markupBarOrigin = markupBarRect
                 return
             }
+            commitActiveTextIfNeeded()
             if let hit = hitAnnotationHandle(at: globalPoint) {
-                selectedMarkupAnnotationID = hit.id
+                selectMarkupAnnotation(hit.id)
                 activeAnnotationHandle = hit.handle
+                resizingAnnotationOrigin = hit.annotation
                 pushUndoSnapshot()
                 return
             }
             if let id = hitAnnotation(at: globalPoint) {
                 if let annotation = markupAnnotations.first(where: { $0.id == id }),
                    annotation.tool == .text,
-                   (clickCount >= 2 || markupTool == .text) {
-                    selectedMarkupAnnotationID = id
+                   clickCount >= 2 {
+                    selectMarkupAnnotation(id)
                     beginTextEditing(annotationID: id, recordUndo: true)
                     refreshOverlays()
                     return
                 }
-                selectedMarkupAnnotationID = id
+                selectMarkupAnnotation(id)
                 movingAnnotationID = id
                 movingAnnotationOrigin = markupAnnotations.first(where: { $0.id == id })
                 pushUndoSnapshot()
@@ -373,7 +383,8 @@ private final class AreaSelectionSession {
         refreshOverlays()
     }
 
-    func handleMouseDragged(globalPoint: CGPoint) {
+    func handleMouseDragged(globalPoint: CGPoint, modifiers: NSEvent.ModifierFlags = []) {
+        isConstrainedDrawing = modifiers.contains(.shift)
         if let activePropertyDrag,
            let propertyBarRect = propertyBarRectGlobal() {
             updatePropertyDrag(activePropertyDrag, globalPoint: globalPoint, rect: propertyBarRect)
@@ -396,7 +407,7 @@ private final class AreaSelectionSession {
         if let activeAnnotationHandle, let selectedMarkupAnnotationID {
             markupAnnotations = markupAnnotations.map { annotation in
                 annotation.id == selectedMarkupAnnotationID
-                    ? annotation.updating(handle: activeAnnotationHandle, to: annotation.tool == .arrow ? globalPoint : clampedAnnotationPoint(globalPoint))
+                    ? (resizingAnnotationOrigin ?? annotation).updating(handle: activeAnnotationHandle, to: globalPoint, within: markupRect ?? annotation.rect, constrained: isConstrainedDrawing)
                     : annotation
             }
             refreshOverlays()
@@ -408,7 +419,7 @@ private final class AreaSelectionSession {
             let dy = globalPoint.y - start.y
             markupAnnotations = markupAnnotations.map { annotation in
                 annotation.id == movingAnnotationID
-                    ? (movingAnnotationOrigin.tool == .arrow
+                    ? (movingAnnotationOrigin.tool.sharesEditorGeometry
                         ? movingAnnotationOrigin.offsetBy(dx: dx, dy: dy)
                         : movingAnnotationOrigin.offsetBy(dx: dx, dy: dy).clamped(to: markupRect ?? movingAnnotationOrigin.rect))
                     : annotation
@@ -442,7 +453,20 @@ private final class AreaSelectionSession {
         refreshOverlays()
     }
 
-    func handleMouseUp(globalPoint: CGPoint) {
+    func handleModifiersChanged(_ modifiers: NSEvent.ModifierFlags) {
+        isConstrainedDrawing = modifiers.contains(.shift)
+        if activeAnnotationHandle != nil {
+            handleMouseDragged(globalPoint: NSEvent.mouseLocation, modifiers: modifiers)
+            return
+        }
+        if let start = dragStart, let end = dragCurrent, draftMarkupAnnotation != nil {
+            draftMarkupAnnotation = makeAnnotation(tool: markupTool, start: start, end: end)
+            refreshOverlays()
+        }
+    }
+
+    func handleMouseUp(globalPoint: CGPoint, modifiers: NSEvent.ModifierFlags = []) {
+        isConstrainedDrawing = modifiers.contains(.shift)
         if activePropertyDrag != nil {
             activePropertyDrag = nil
             pointerDownPoint = nil
@@ -471,6 +495,7 @@ private final class AreaSelectionSession {
 
         if activeAnnotationHandle != nil {
             activeAnnotationHandle = nil
+            resizingAnnotationOrigin = nil
             pointerDownPoint = nil
             return
         }
@@ -494,10 +519,14 @@ private final class AreaSelectionSession {
         }
 
         if let markupRect {
+            if markupTool == .text, draftMarkupAnnotation == nil, let start = dragStart {
+                draftMarkupAnnotation = makeAnnotation(tool: .text, start: start, end: globalPoint)
+            }
             if markupTool != .select, let draftMarkupAnnotation {
                 let rect = draftMarkupAnnotation.rect
-                if rect.width > 3 || rect.height > 3 || markupTool == .text {
-                    let annotation = draftMarkupAnnotation.clamped(to: markupRect)
+                let isValid = (markupTool == .rectangle || markupTool == .oval) ? (rect.width > 3 && rect.height > 3) : (rect.width > 3 || rect.height > 3 || markupTool == .text)
+                if isValid {
+                    let annotation = draftMarkupAnnotation.tool.sharesEditorGeometry ? draftMarkupAnnotation : draftMarkupAnnotation.clamped(to: markupRect)
                     pushUndoSnapshot()
                     markupAnnotations.append(annotation)
                     selectedMarkupAnnotationID = annotation.id
@@ -532,10 +561,7 @@ private final class AreaSelectionSession {
         }
 
         // A click (no meaningful drag): capture the window under the cursor.
-        if let window = WindowEnumerator.window(
-            at: globalPoint,
-            excludedWindowNumbers: excludedWindowNumbers
-        ) {
+        if let window = window(at: globalPoint) {
             if quickMarkupEnabled {
                 enterMarkupMode(rect: window.frame.integral)
                 return
@@ -599,14 +625,18 @@ private final class AreaSelectionSession {
     }
 
     private func updateHover(globalPoint: CGPoint) {
-        let window = WindowEnumerator.window(
-            at: globalPoint,
-            excludedWindowNumbers: excludedWindowNumbers
-        )
+        let window = window(at: globalPoint)
         guard window != hoveredWindow else { return }
         hoveredWindow = window
         refreshOverlays()
     }
+
+    private func window(at point: CGPoint) -> WindowDescriptor? {
+        if let snapshotWindows { return snapshotWindows.first { $0.frame.contains(point) } }
+        return WindowEnumerator.window(at: point, excludedWindowNumbers: excludedWindowNumbers)
+    }
+
+    var showsFrozenDesktop: Bool { !isScrollingCaptureInProgress }
 
     private var dragRect: CGRect? {
         guard let dragStart, let dragCurrent else { return nil }
@@ -709,6 +739,11 @@ private final class AreaSelectionSession {
     }
 
     private func setPropertyTool(_ tool: OverlayMarkupTool) {
+        commitActiveTextIfNeeded()
+        if let id = selectedMarkupAnnotationID, markupAnnotations.first(where: { $0.id == id })?.tool != tool {
+            selectedMarkupAnnotationID = nil
+        }
+        currentMarkupColor = tool == .text ? currentMarkupTextColor : currentMarkupAnnotationColor
         propertyTool = tool
         if tool.usesStrokeWidthDots {
             currentMarkupLineWidth = nearestLineWidthDotValue(to: currentMarkupLineWidth)
@@ -720,11 +755,20 @@ private final class AreaSelectionSession {
         AnnotationDefaults.quickMarkupLineWidths.min { abs($0 - value) < abs($1 - value) } ?? AnnotationDefaults.lineWidth
     }
 
+    private var propertyBarSize: CGSize {
+        if propertyTool == .text { return CGSize(width: 330, height: 76) }
+        if propertyTool?.usesStrokeWidthDots == true {
+            return QuickMarkupPropertyBarLayout(sizeCount: AnnotationDefaults.quickMarkupLineWidths.count).size
+        }
+        return CGSize(width: 330, height: 42)
+    }
+
+    var currentPropertyTextFilled: Bool { currentMarkupTextFillColor.alphaComponent > 0 }
+    var currentPropertyFontSize: CGFloat { currentMarkupFontSize }
+
     private func propertyBarRectGlobal() -> CGRect? {
         guard propertyTool != nil, let markupBarRect else { return nil }
-        let size = propertyTool?.usesStrokeWidthDots == true
-            ? QuickMarkupPropertyBarLayout(sizeCount: AnnotationDefaults.quickMarkupLineWidths.count).size
-            : CGSize(width: 330, height: 42)
+        let size = propertyBarSize
         let gap: CGFloat = 8
         let screenFrame = NSScreen.screens.first(where: { $0.frame.intersects(markupBarRect) })?.frame
             ?? NSScreen.main?.frame
@@ -740,6 +784,17 @@ private final class AreaSelectionSession {
         defer {
             cursor(at: globalPoint).set()
         }
+        if propertyTool == .text, globalPoint.y < rect.maxY - 42 {
+            guard let filled = QuickMarkupPropertyBarLayout.textStyle(at: globalPoint, in: rect) else { return }
+            let style = AnnotationTextRenderer.style(filled: filled, color: currentMarkupColor, fillColor: currentMarkupTextFillColor)
+            currentMarkupColor = style.color
+            currentMarkupTextColor = style.color
+            currentMarkupTextFillColor = style.fill
+            updateSelectedAnnotationStyle()
+            refreshOverlays()
+            return
+        }
+        let rect = propertyTool == .text ? QuickMarkupPropertyBarLayout.textControls(in: rect) : rect
         let relativeX = globalPoint.x - rect.minX
         if propertyTool == .blur {
             currentMosaicIntensity = min(max((relativeX - 142) / 112, 0), 1)
@@ -763,6 +818,8 @@ private final class AreaSelectionSession {
         if relativeX < 190 {
             let index = min(max(Int(relativeX / 26), 0), swatches.count - 1)
             currentMarkupColor = swatches[index]
+            if propertyTool == .text { currentMarkupTextColor = currentMarkupColor }
+            else { currentMarkupAnnotationColor = currentMarkupColor }
             updateSelectedAnnotationStyle()
         } else {
             let values: [CGFloat]
@@ -910,13 +967,33 @@ private final class AreaSelectionSession {
         }
     }
 
+    private func selectMarkupAnnotation(_ id: UUID) {
+        selectedMarkupAnnotationID = id
+        guard let annotation = markupAnnotations.first(where: { $0.id == id }) else { return }
+        propertyTool = annotation.tool
+        currentMarkupColor = annotation.color
+        currentMarkupLineWidth = annotation.lineWidth
+        if annotation.tool == .text {
+            currentMarkupTextColor = annotation.color
+            currentMarkupFontSize = annotation.fontSize
+            currentMarkupTextFillColor = annotation.textFillColor
+        } else {
+            currentMarkupAnnotationColor = annotation.color
+        }
+    }
+
     private func updateSelectedAnnotationStyle() {
         guard let selectedMarkupAnnotationID else { return }
         markupAnnotations = markupAnnotations.map { annotation in
-            annotation.id == selectedMarkupAnnotationID
-                ? annotation.withStyle(color: currentMarkupColor, lineWidth: currentMarkupLineWidth, fontSize: currentMarkupFontSize)
-                    .withEffects(mosaicIntensity: currentMosaicIntensity, highlightOpacity: currentHighlightOpacity, highlightShape: currentHighlightShape)
-                : annotation
+            guard annotation.id == selectedMarkupAnnotationID else { return annotation }
+            if annotation.tool == .text {
+                return annotation.withTextAppearance(color: currentMarkupColor, fontSize: currentMarkupFontSize, fillColor: currentMarkupTextFillColor)
+            }
+            return annotation.withStyle(color: currentMarkupColor, lineWidth: currentMarkupLineWidth, fontSize: currentMarkupFontSize)
+        }
+        if let annotation = markupAnnotations.first(where: { $0.id == selectedMarkupAnnotationID }), annotation.tool == .text {
+            autosizeTextAnnotation(id: selectedMarkupAnnotationID)
+            activeTextEditingView?.refreshActiveTextStyle()
         }
     }
 
@@ -945,12 +1022,14 @@ private final class AreaSelectionSession {
         markupAnnotations = snapshot.annotations
         selectedMarkupAnnotationID = snapshot.selectedAnnotationID
         activeTextAnnotationID = nil
+        activeTextInitialSnapshot = nil
         activeTextEditingView?.discardTextEditing()
         activeTextEditingView = nil
         draftMarkupAnnotation = nil
         dragStart = nil
         dragCurrent = nil
         activeAnnotationHandle = nil
+        resizingAnnotationOrigin = nil
         movingAnnotationID = nil
         movingAnnotationOrigin = nil
         refreshOverlays()
@@ -962,10 +1041,10 @@ private final class AreaSelectionSession {
               let view = views.first(where: { $0.screenFrameContains(annotation.rect) }) else {
             return
         }
-        if recordUndo {
-            pushUndoSnapshot()
-        }
         activeTextEditingView?.endTextEditing(commit: true)
+        activeTextInitialSnapshot = recordUndo ? currentSnapshot() : undoStack.last
+        activeTextUndoStackCount = recordUndo ? undoStack.count : max(0, undoStack.count - 1)
+        if recordUndo { pushUndoSnapshot() }
         activeTextAnnotationID = annotationID
         activeTextEditingView = view
         view.beginTextEditing()
@@ -990,14 +1069,16 @@ private final class AreaSelectionSession {
             selectedMarkupAnnotationID = activeTextAnnotationID
         }
         self.activeTextAnnotationID = nil
+        activeTextInitialSnapshot = nil
         activeTextEditingView = nil
         refreshOverlays()
     }
 
     func cancelActiveTextEditing() {
-        undoMarkup()
-        activeTextAnnotationID = nil
-        activeTextEditingView = nil
+        guard let snapshot = activeTextInitialSnapshot else { return }
+        undoStack = Array(undoStack.prefix(activeTextUndoStackCount))
+        activeTextInitialSnapshot = nil
+        restore(snapshot)
     }
 
     private func commitActiveTextIfNeeded() {
@@ -1007,43 +1088,38 @@ private final class AreaSelectionSession {
     private func autosizeTextAnnotation(id: UUID) {
         guard let index = markupAnnotations.firstIndex(where: { $0.id == id }) else { return }
         let annotation = markupAnnotations[index]
-        let size = textBoxSize(for: annotation.text, fontSize: annotation.fontSize)
-        let rect = annotation.rect
-        let width = max(rect.width, size.width)
-        let height = max(rect.height, size.height)
-        markupAnnotations[index] = annotation.updatingTextRect(CGRect(x: rect.minX, y: rect.minY, width: width, height: height))
+        let bounds = markupRect ?? annotation.rect
+        let rect = AnnotationTextRenderer.autosizedRect(annotation.rect, text: annotation.text, fontSize: annotation.fontSize, within: bounds)
+        markupAnnotations[index] = annotation.updatingTextRect(rect)
     }
 
     private func textBoxSize(for text: String, fontSize: CGFloat) -> CGSize {
-        let font = NSFont(name: "PingFangSC-Regular", size: fontSize) ?? NSFont.systemFont(ofSize: fontSize, weight: .regular)
-        let display = text.isEmpty ? " " : text
-        let size = (display as NSString).size(withAttributes: [.font: font])
-        return CGSize(width: ceil(size.width) + 28, height: ceil(font.ascender - font.descender + font.leading) + 16)
+        AnnotationTextRenderer.boxSize(for: text, fontSize: fontSize)
     }
 
     private func makeAnnotation(tool: OverlayMarkupTool, start: CGPoint, end: CGPoint) -> OverlayMarkupAnnotation {
+        let origin: CGPoint
         let annotationEnd: CGPoint
         if tool == .text {
-            let rawRect = CGRect(
-                x: min(start.x, end.x),
-                y: min(start.y, end.y),
-                width: abs(end.x - start.x),
-                height: abs(end.y - start.y)
-            )
-            let textSize = textBoxSize(for: "", fontSize: currentMarkupFontSize)
-            let width = rawRect.width >= 4 ? max(rawRect.width, textSize.width) : textSize.width
-            let height = rawRect.height >= 4 ? max(rawRect.height, textSize.height) : textSize.height
-            annotationEnd = CGPoint(x: start.x + width, y: start.y + height)
+            let rect = AnnotationTextRenderer.fittedRect(from: start, to: end, text: "", fontSize: currentMarkupFontSize, within: markupRect ?? CGRect(origin: start, size: CGSize(width: 120, height: 60)))
+            origin = rect.origin
+            annotationEnd = CGPoint(x: rect.maxX, y: rect.maxY)
+        } else if tool == .rectangle || tool == .oval {
+            let rect = AnnotationShapeGeometry.normalized(from: start, to: clampedAnnotationPoint(end), constrained: isConstrainedDrawing)
+            origin = rect.origin
+            annotationEnd = CGPoint(x: rect.maxX, y: rect.maxY)
         } else {
+            origin = start
             annotationEnd = end
         }
         return OverlayMarkupAnnotation(
             tool: tool,
-            start: start,
+            start: origin,
             end: annotationEnd,
             color: currentMarkupColor,
             lineWidth: currentMarkupLineWidth,
             fontSize: currentMarkupFontSize,
+            textFillColor: tool == .text ? currentMarkupTextFillColor : .clear,
             mosaicIntensity: currentMosaicIntensity,
             highlightOpacity: currentHighlightOpacity,
             highlightShape: currentHighlightShape
@@ -1099,6 +1175,18 @@ private final class AreaSelectionSession {
                 continue
             }
             guard annotation.id == selectedMarkupAnnotationID else { continue }
+            if annotation.tool == .line {
+                if let handle = annotation.arrowGeometry.hitHandle(at: point) {
+                    return (annotation.id, OverlayAnnotationHandle(arrowHandle: handle), annotation)
+                }
+                continue
+            }
+            if annotation.tool == .rectangle || annotation.tool == .oval {
+                if let handle = AnnotationShapeGeometry.hitHandle(at: point, rect: annotation.rect, flipped: false, kind: annotation.tool == .oval ? .oval : .rectangle) {
+                    return (annotation.id, OverlayAnnotationHandle(shapeHandle: handle), annotation)
+                }
+                continue
+            }
             for (handle, anchor) in annotation.handlePoints {
                 if abs(point.x - anchor.x) <= radius && abs(point.y - anchor.y) <= radius {
                     return (annotation.id, handle, annotation)
@@ -1114,9 +1202,9 @@ private final class AreaSelectionSession {
             case .arrow:
                 if annotation.arrowGeometry.hit(at: point, width: annotation.lineWidth, curved: false) { return annotation.id }
             case .line:
-                if distanceFromPoint(point, toLineStart: annotation.start, end: annotation.end) <= 9 {
-                    return annotation.id
-                }
+                if annotation.arrowGeometry.hit(at: point, width: annotation.lineWidth, curved: false, includesArrowhead: false) { return annotation.id }
+            case .rectangle, .oval:
+                if AnnotationShapeGeometry.hitStroke(at: point, kind: annotation.tool == .rectangle ? .rectangle : .oval, rect: annotation.rect, width: annotation.lineWidth) { return annotation.id }
             default:
                 if annotation.rect.insetBy(dx: -6, dy: -6).contains(point) {
                     return annotation.id
@@ -1278,16 +1366,7 @@ private final class AreaSelectionSession {
             return nil
         }
 
-        let scaleX = CGFloat(screenSnapshot.image.width) / max(snapshotScreenFrame.width, 1)
-        let scaleY = CGFloat(screenSnapshot.image.height) / max(snapshotScreenFrame.height, 1)
-        let cropRect = CGRect(
-            x: (clippedRect.minX - snapshotScreenFrame.minX) * scaleX,
-            y: (snapshotScreenFrame.maxY - clippedRect.maxY) * scaleY,
-            width: clippedRect.width * scaleX,
-            height: clippedRect.height * scaleY
-        ).integral
-
-        guard let crop = screenSnapshot.image.cropping(to: cropRect) else {
+        guard let crop = CaptureSnapshotGeometry.crop(screenSnapshot.image, sourceRect: snapshotScreenFrame, to: clippedRect) else {
             return nil
         }
         return CapturedScreenshot(image: crop, scaleFactor: screenSnapshot.scaleFactor, sourceRect: clippedRect)
@@ -1358,7 +1437,7 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
     private let screenFrame: CGRect
     private let screenSnapshot: CGImage?
     private weak var session: AreaSelectionSession?
-    private var activeTextEditor: OverlayInlineTextView?
+    private var activeTextEditor: AnnotationInlineTextView?
 
     init(screenFrame: CGRect, screenSnapshot: CGImage?, session: AreaSelectionSession) {
         self.screenFrame = screenFrame
@@ -1406,7 +1485,8 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
     func beginTextEditing() {
         endTextEditing(commit: true)
         guard let annotation = session?.activeTextAnnotation(in: screenFrame) else { return }
-        let editor = OverlayInlineTextView(frame: annotation.rect)
+        let editor = AnnotationInlineTextView(frame: annotation.rect)
+        editor.forwardsBorderMouseEvents = true
         editor.delegate = self
         editor.drawsBackground = false
         editor.isRichText = false
@@ -1431,7 +1511,7 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
         wantsLayer = true
         editor.wantsLayer = true
         editor.layer?.cornerRadius = 8
-        editor.layer?.backgroundColor = NSColor.clear.cgColor
+        editor.layer?.backgroundColor = annotation.textFillColor.cgColor
         addSubview(editor)
         activeTextEditor = editor
         window?.makeFirstResponder(editor)
@@ -1458,29 +1538,18 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
         window?.makeFirstResponder(self)
     }
 
-    private func configureTextEditor(_ editor: OverlayInlineTextView, annotation: OverlayMarkupAnnotation) {
-        let font = NSFont(name: "PingFangSC-Regular", size: annotation.fontSize) ?? NSFont.systemFont(ofSize: annotation.fontSize, weight: .regular)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: annotation.color,
-            .paragraphStyle: paragraph
-        ]
-        editor.font = font
-        editor.alignment = .center
-        editor.textColor = annotation.color
-        editor.insertionPointColor = annotation.color
-        editor.customCaretColor = annotation.color
-        editor.typingAttributes = attributes
-        editor.textStorage?.setAttributes(attributes, range: NSRange(location: 0, length: (editor.string as NSString).length))
-        let lineHeight = ceil(font.ascender - font.descender + font.leading)
-        editor.textContainerInset = NSSize(width: 14, height: max(0, (editor.bounds.height - lineHeight) / 2))
-        editor.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: max(editor.bounds.height, 1))
+    private func configureTextEditor(_ editor: AnnotationInlineTextView, annotation: OverlayMarkupAnnotation) {
+        AnnotationTextRenderer.configure(editor, color: annotation.color, fillColor: annotation.textFillColor, fontSize: annotation.fontSize)
+    }
+
+    func refreshActiveTextStyle() {
+        guard let editor = activeTextEditor, let annotation = session?.activeTextAnnotation(in: screenFrame) else { return }
+        editor.frame = annotation.rect
+        configureTextEditor(editor, annotation: annotation)
     }
 
     func textDidChange(_ notification: Notification) {
-        guard let editor = notification.object as? OverlayInlineTextView,
+        guard let editor = notification.object as? AnnotationInlineTextView,
               editor === activeTextEditor else {
             return
         }
@@ -1495,19 +1564,19 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
 
     override func mouseDown(with event: NSEvent) {
         let point = globalPoint(from: event)
-        session?.handleMouseDown(globalPoint: point, clickCount: event.clickCount)
+        session?.handleMouseDown(globalPoint: point, clickCount: event.clickCount, modifiers: event.modifierFlags)
         session?.refreshCursor(globalPoint: point)
     }
 
     override func mouseDragged(with event: NSEvent) {
         let point = globalPoint(from: event)
-        session?.handleMouseDragged(globalPoint: point)
+        session?.handleMouseDragged(globalPoint: point, modifiers: event.modifierFlags)
         session?.refreshCursor(globalPoint: point)
     }
 
     override func mouseUp(with event: NSEvent) {
         let point = globalPoint(from: event)
-        session?.handleMouseUp(globalPoint: point)
+        session?.handleMouseUp(globalPoint: point, modifiers: event.modifierFlags)
         session?.refreshCursor(globalPoint: point)
     }
 
@@ -1519,6 +1588,11 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
 
     override func mouseMoved(with event: NSEvent) {
         session?.handleMouseMoved(globalPoint: globalPoint(from: event))
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        session?.handleModifiersChanged(event.modifierFlags)
+        super.flagsChanged(with: event)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -1548,14 +1622,9 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
-        NSColor.black.withAlphaComponent(0.32).setFill()
-        bounds.fill()
-
-        guard let activeRect = activeRectInViewCoordinates() else { return }
-
-        // Punch a bright hole so the selected window/region shows through the dim mask.
-        NSColor.clear.setFill()
-        activeRect.fill(using: .clear)
+        let activeRect = activeRectInViewCoordinates()
+        CaptureSnapshotGeometry.drawBackdrop(session?.showsFrozenDesktop == true ? screenSnapshot : nil, in: bounds, selection: activeRect)
+        guard let activeRect else { return }
 
         if session?.isHighlightingWindow == false && session?.isInMarkupMode != true {
             NSColor.systemBlue.withAlphaComponent(0.12).setFill()
@@ -1597,45 +1666,17 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
         let rect = annotation.rect
         switch annotation.tool {
         case .rectangle:
-            let path = NSBezierPath(rect: rect)
-            path.lineWidth = annotation.lineWidth
-            annotation.color.setStroke()
-            path.stroke()
+            AnnotationShapeGeometry.draw(.rectangle, in: rect, color: annotation.color, width: annotation.lineWidth)
         case .oval:
-            let path = NSBezierPath(ovalIn: rect)
-            path.lineWidth = annotation.lineWidth
-            annotation.color.setStroke()
-            path.stroke()
+            AnnotationShapeGeometry.draw(.oval, in: rect, color: annotation.color, width: annotation.lineWidth)
         case .line:
-            let path = NSBezierPath()
-            path.move(to: annotation.start)
-            let control = annotation.control ?? annotation.defaultControl
-            path.curve(to: annotation.end, controlPoint1: control, controlPoint2: control)
-            path.lineWidth = annotation.lineWidth
-            annotation.color.setStroke()
-            path.stroke()
+            AnnotationLineRenderer.draw(start: annotation.start, control: annotation.control ?? annotation.defaultControl, end: annotation.end, color: annotation.color, width: annotation.lineWidth)
         case .arrow:
             drawCurvedArrow(annotation)
         case .highlighter:
             drawSpotlight(annotation)
         case .text:
-            let path = NSBezierPath(roundedRect: rect.width > 1 && rect.height > 1 ? rect : CGRect(x: annotation.start.x, y: annotation.start.y, width: 120, height: 36), xRadius: 7, yRadius: 7)
-            annotation.color.withAlphaComponent(0.12).setFill()
-            path.fill()
-            annotation.color.setStroke()
-            path.lineWidth = 2
-            path.stroke()
-            guard !annotation.text.isEmpty else { return }
-            let font = NSFont(name: "PingFangSC-Regular", size: annotation.fontSize) ?? NSFont.systemFont(ofSize: annotation.fontSize, weight: .regular)
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.alignment = .center
-            let lineHeight = ceil(font.ascender - font.descender + font.leading)
-            let textRect = CGRect(x: path.bounds.minX + 14, y: path.bounds.midY - lineHeight / 2, width: max(1, path.bounds.width - 28), height: lineHeight)
-            annotation.text.draw(in: textRect, withAttributes: [
-                .font: font,
-                .foregroundColor: annotation.color,
-                .paragraphStyle: paragraph
-            ])
+            AnnotationTextRenderer.draw(annotation.text, in: rect, color: annotation.color, fontSize: annotation.fontSize, fillColor: annotation.textFillColor, selected: session?.selectedMarkupAnnotation(in: screenFrame)?.id == annotation.id)
         case .blur:
             drawMosaicPreview(annotation)
         case .select:
@@ -1728,6 +1769,7 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
 
     private func drawSelectedAnnotationHandles() {
         guard let annotation = session?.selectedMarkupAnnotation(in: screenFrame) else { return }
+        guard annotation.tool != .text else { return }
         for (_, point) in annotation.handlePoints {
             AnnotationArrowGeometry.drawHandle(at: point)
         }
@@ -1824,6 +1866,10 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
             return
         }
 
+        if session?.activePropertyTool == .text {
+            drawTextStyleButtons(in: rect)
+        }
+        let rect = session?.activePropertyTool == .text ? QuickMarkupPropertyBarLayout.textControls(in: rect) : rect
         let swatches: [NSColor] = [AnnotationDefaults.color, .systemYellow, .systemGreen, .systemBlue, .black, .systemGray, .white]
         for (index, color) in swatches.enumerated() {
             let center = CGPoint(x: rect.minX + 14 + CGFloat(index) * 26, y: rect.midY)
@@ -1882,6 +1928,18 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
                     .paragraphStyle: centeredParagraphStyle()
                 ])
             }
+        }
+    }
+
+    private func drawTextStyleButtons(in rect: CGRect) {
+        for (filled, label) in [(false, "Normal"), (true, "Filled")] {
+            let button = QuickMarkupPropertyBarLayout.textStyleRect(filled: filled, in: rect)
+            let selected = session?.currentPropertyTextFilled == filled
+            (selected ? NSColor.controlAccentColor.withAlphaComponent(0.18) : NSColor.labelColor.withAlphaComponent(0.06)).setFill()
+            NSBezierPath(roundedRect: button, xRadius: 6, yRadius: 6).fill()
+            let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor.labelColor]
+            let size = (label as NSString).size(withAttributes: attributes)
+            (label as NSString).draw(at: CGPoint(x: button.midX - size.width / 2, y: button.midY - size.height / 2), withAttributes: attributes)
         }
     }
 
@@ -2139,129 +2197,6 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
     }
 }
 
-private final class OverlayInlineTextView: NSTextView {
-    var onCommit: (() -> Void)?
-    var onCancel: (() -> Void)?
-    var onEditingLayoutChange: (() -> Void)?
-    var customCaretColor: NSColor = .labelColor {
-        didSet { needsDisplay = true }
-    }
-
-    private var customCaretVisible = true
-    private var customCaretTimer: Timer?
-
-    deinit {
-        customCaretTimer?.invalidate()
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if window == nil {
-            customCaretTimer?.invalidate()
-            customCaretTimer = nil
-        } else if customCaretTimer == nil {
-            customCaretTimer = Timer.scheduledTimer(withTimeInterval: 0.55, repeats: true) { [weak self] _ in
-                guard let self else { return }
-                self.customCaretVisible.toggle()
-                self.needsDisplay = true
-            }
-        }
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        drawCustomEmptyCaretIfNeeded()
-    }
-
-    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
-        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
-        onEditingLayoutChange?()
-    }
-
-    override func unmarkText() {
-        super.unmarkText()
-        onEditingLayoutChange?()
-    }
-
-    override func insertText(_ insertString: Any, replacementRange: NSRange) {
-        super.insertText(insertString, replacementRange: replacementRange)
-        onEditingLayoutChange?()
-    }
-
-    override func setSelectedRange(_ charRange: NSRange) {
-        super.setSelectedRange(charRange)
-        onEditingLayoutChange?()
-    }
-
-    override func doCommand(by selector: Selector) {
-        if selector == #selector(cancelOperation(_:)) {
-            onCancel?()
-            return
-        }
-        if selector == #selector(insertNewline(_:)) || selector == #selector(insertNewlineIgnoringFieldEditor(_:)) {
-            let flags = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
-            if flags.contains(.command) {
-                onCommit?()
-                return
-            }
-        }
-        super.doCommand(by: selector)
-    }
-
-    private func drawCustomEmptyCaretIfNeeded() {
-        guard string.isEmpty,
-              selectedRange().length == 0,
-              window?.firstResponder === self,
-              customCaretVisible else {
-            return
-        }
-        let font = font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
-        let lineHeight = ceil(font.ascender - font.descender + font.leading)
-        let caretWidth: CGFloat = 1.5
-        let rect = CGRect(
-            x: bounds.midX - caretWidth / 2,
-            y: textContainerInset.height,
-            width: caretWidth,
-            height: lineHeight
-        )
-        customCaretColor.setFill()
-        NSBezierPath(rect: rect).fill()
-    }
-}
-
-enum OverlayMarkupTool {
-    case select
-    case rectangle
-    case oval
-    case line
-    case arrow
-    case highlighter
-    case text
-    case blur
-
-    var barIndex: Int {
-        switch self {
-        case .rectangle: return 1
-        case .oval: return 2
-        case .line: return 3
-        case .arrow: return 4
-        case .text: return 5
-        case .blur: return 7
-        case .highlighter: return 8
-        case .select: return -1
-        }
-    }
-
-    var usesStrokeWidthDots: Bool {
-        switch self {
-        case .rectangle, .oval, .line, .arrow:
-            return true
-        case .select, .text, .highlighter, .blur:
-            return false
-        }
-    }
-}
-
 private enum OverlayMarkupCompletionAction {
     case copy
     case save
@@ -2430,12 +2365,6 @@ private struct QuickMarkupBarSlot {
     }
 }
 
-enum OverlayHighlightShape {
-    case rectangle
-    case oval
-    case roundedRectangle
-}
-
 private struct OverlayMarkupSnapshot {
     let annotations: [OverlayMarkupAnnotation]
     let selectedAnnotationID: UUID?
@@ -2524,357 +2453,6 @@ private enum OverlaySelectionHandle: CaseIterable {
             return CGPoint(x: rect.minX, y: rect.maxY)
         case .left:
             return CGPoint(x: rect.minX, y: rect.midY)
-        }
-    }
-}
-
-struct OverlayMarkupAnnotation {
-    let id: UUID
-    let tool: OverlayMarkupTool
-    let start: CGPoint
-    let end: CGPoint
-    let control: CGPoint?
-    let color: NSColor
-    let lineWidth: CGFloat
-    let fontSize: CGFloat
-    let text: String
-    let mosaicIntensity: CGFloat
-    let highlightOpacity: CGFloat
-    let highlightShape: OverlayHighlightShape
-
-    init(
-        id: UUID = UUID(),
-        tool: OverlayMarkupTool,
-        start: CGPoint,
-        end: CGPoint,
-        control: CGPoint? = nil,
-        color: NSColor = AnnotationDefaults.color,
-        lineWidth: CGFloat = AnnotationDefaults.lineWidth,
-        fontSize: CGFloat = 18,
-        text: String = "",
-        mosaicIntensity: CGFloat = 0.5,
-        highlightOpacity: CGFloat = 0.5,
-        highlightShape: OverlayHighlightShape = .rectangle
-    ) {
-        self.id = id
-        self.tool = tool
-        self.start = start
-        self.end = end
-        self.control = control ?? ((tool == .arrow || tool == .line) ? OverlayMarkupAnnotation.defaultControl(start: start, end: end) : nil)
-        self.color = color
-        self.lineWidth = lineWidth
-        self.fontSize = fontSize
-        self.text = text
-        self.mosaicIntensity = mosaicIntensity
-        self.highlightOpacity = highlightOpacity
-        self.highlightShape = highlightShape
-    }
-
-    var rect: CGRect {
-        if tool == .arrow { return arrowGeometry.bounds }
-        return CGRect(
-            x: min(start.x, end.x),
-            y: min(start.y, end.y),
-            width: abs(end.x - start.x),
-            height: abs(end.y - start.y)
-        )
-    }
-
-    var defaultControl: CGPoint {
-        Self.defaultControl(start: start, end: end)
-    }
-
-    func highlightPath(in rect: CGRect) -> NSBezierPath {
-        switch highlightShape {
-        case .rectangle:
-            return NSBezierPath(rect: rect)
-        case .oval:
-            return NSBezierPath(ovalIn: rect)
-        case .roundedRectangle:
-            return NSBezierPath(roundedRect: rect, xRadius: 10, yRadius: 10)
-        }
-    }
-
-    var arrowGeometry: AnnotationArrowGeometry {
-        AnnotationArrowGeometry(start: start, control: control ?? defaultControl, end: end)
-    }
-
-    var handlePoints: [(OverlayAnnotationHandle, CGPoint)] {
-        switch tool {
-        case .arrow:
-            return arrowGeometry.handles.map { (OverlayAnnotationHandle(arrowHandle: $0.0), $0.1) }
-        case .line:
-            return [
-                (.start, start),
-                (.control, control ?? defaultControl),
-                (.end, end)
-            ]
-        case .rectangle, .oval, .highlighter, .blur, .text:
-            return OverlayAnnotationHandle.shapeCases.map { ($0, $0.point(in: rect)) }
-        default:
-            return []
-        }
-    }
-
-    var lineSamplePoints: [CGPoint] {
-        let steps = 24
-        switch tool {
-        case .arrow:
-            return AnnotationArrowRenderer.centerline(start: start, control: control ?? defaultControl, end: end, curved: false).map(\.point)
-        case .line:
-            return (0...steps).map { step in
-                let t = CGFloat(step) / CGFloat(steps)
-                let oneMinusT = 1 - t
-                let control = control ?? defaultControl
-                return CGPoint(
-                    x: oneMinusT * oneMinusT * start.x + 2 * oneMinusT * t * control.x + t * t * end.x,
-                    y: oneMinusT * oneMinusT * start.y + 2 * oneMinusT * t * control.y + t * t * end.y
-                )
-            }
-        default:
-            return []
-        }
-    }
-
-    func clamped(to bounds: CGRect) -> OverlayMarkupAnnotation {
-        copy(
-            start: clamp(start, to: bounds),
-            end: clamp(end, to: bounds),
-            control: control.map { clamp($0, to: bounds) }
-        )
-    }
-
-    func inViewCoordinates(screenFrame: CGRect) -> OverlayMarkupAnnotation? {
-        let bounds = CGRect(origin: screenFrame.origin, size: screenFrame.size)
-        let clipped = rect.intersection(bounds)
-        guard !clipped.isNull, clipped.width > 0 || clipped.height > 0 else {
-            return nil
-        }
-        return copy(
-            start: CGPoint(x: start.x - screenFrame.minX, y: start.y - screenFrame.minY),
-            end: CGPoint(x: end.x - screenFrame.minX, y: end.y - screenFrame.minY),
-            control: control.map { CGPoint(x: $0.x - screenFrame.minX, y: $0.y - screenFrame.minY) }
-        )
-    }
-
-    func updating(handle: OverlayAnnotationHandle, to point: CGPoint) -> OverlayMarkupAnnotation {
-        if tool == .arrow, let arrowHandle = handle.arrowHandle {
-            let geometry = arrowGeometry.updating(arrowHandle, to: point)
-            return copy(start: geometry.start, end: geometry.end, control: geometry.control)
-        }
-        if handle.isShapeHandle {
-            return updatingRect(resizedRect(handle: handle, to: point))
-        }
-
-        switch handle {
-        case .start:
-            return copy(start: point)
-        case .control:
-            return copy(control: point)
-        case .end:
-            return copy(end: point)
-        default:
-            return self
-        }
-    }
-
-    func withStyle(color: NSColor, lineWidth: CGFloat, fontSize: CGFloat) -> OverlayMarkupAnnotation {
-        copy(color: color, lineWidth: lineWidth, fontSize: fontSize)
-    }
-
-    func withEffects(mosaicIntensity: CGFloat, highlightOpacity: CGFloat, highlightShape: OverlayHighlightShape) -> OverlayMarkupAnnotation {
-        copy(mosaicIntensity: mosaicIntensity, highlightOpacity: highlightOpacity, highlightShape: highlightShape)
-    }
-
-    func withText(_ text: String) -> OverlayMarkupAnnotation {
-        copy(text: text)
-    }
-
-    func updatingTextRect(_ rect: CGRect) -> OverlayMarkupAnnotation {
-        updatingRect(rect)
-    }
-
-    func offsetBy(dx: CGFloat, dy: CGFloat) -> OverlayMarkupAnnotation {
-        if tool == .arrow {
-            let geometry = arrowGeometry.offsetBy(dx: dx, dy: dy)
-            return copy(start: geometry.start, end: geometry.end, control: geometry.control)
-        }
-        return copy(
-            start: CGPoint(x: start.x + dx, y: start.y + dy),
-            end: CGPoint(x: end.x + dx, y: end.y + dy),
-            control: control.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
-        )
-    }
-
-    private func updatingRect(_ rect: CGRect) -> OverlayMarkupAnnotation {
-        copy(
-            start: CGPoint(x: rect.minX, y: rect.minY),
-            end: CGPoint(x: rect.maxX, y: rect.maxY),
-            control: control
-        )
-    }
-
-    private func copy(
-        start: CGPoint? = nil,
-        end: CGPoint? = nil,
-        control: CGPoint? = nil,
-        color: NSColor? = nil,
-        lineWidth: CGFloat? = nil,
-        fontSize: CGFloat? = nil,
-        text: String? = nil,
-        mosaicIntensity: CGFloat? = nil,
-        highlightOpacity: CGFloat? = nil,
-        highlightShape: OverlayHighlightShape? = nil
-    ) -> OverlayMarkupAnnotation {
-        OverlayMarkupAnnotation(
-            id: id,
-            tool: tool,
-            start: start ?? self.start,
-            end: end ?? self.end,
-            control: control ?? self.control,
-            color: color ?? self.color,
-            lineWidth: lineWidth ?? self.lineWidth,
-            fontSize: fontSize ?? self.fontSize,
-            text: text ?? self.text,
-            mosaicIntensity: mosaicIntensity ?? self.mosaicIntensity,
-            highlightOpacity: highlightOpacity ?? self.highlightOpacity,
-            highlightShape: highlightShape ?? self.highlightShape
-        )
-    }
-
-    private func resizedRect(handle: OverlayAnnotationHandle, to point: CGPoint) -> CGRect {
-        let minSize: CGFloat = 6
-        var minX = rect.minX
-        var maxX = rect.maxX
-        var minY = rect.minY
-        var maxY = rect.maxY
-
-        if handle.movesLeft { minX = min(point.x, maxX - minSize) }
-        if handle.movesRight { maxX = max(point.x, minX + minSize) }
-        if handle.movesBottom { minY = min(point.y, maxY - minSize) }
-        if handle.movesTop { maxY = max(point.y, minY + minSize) }
-
-        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
-    }
-
-    private static func defaultControl(start: CGPoint, end: CGPoint) -> CGPoint {
-        CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
-    }
-
-    private func clamp(_ point: CGPoint, to bounds: CGRect) -> CGPoint {
-        CGPoint(
-            x: min(max(point.x, bounds.minX), bounds.maxX),
-            y: min(max(point.y, bounds.minY), bounds.maxY)
-        )
-    }
-}
-
-enum OverlayAnnotationHandle {
-    case start
-    case control
-    case end
-    case topLeft
-    case top
-    case topRight
-    case right
-    case bottomRight
-    case bottom
-    case bottomLeft
-    case left
-
-    static let shapeCases: [OverlayAnnotationHandle] = [
-        .topLeft,
-        .top,
-        .topRight,
-        .right,
-        .bottomRight,
-        .bottom,
-        .bottomLeft,
-        .left
-    ]
-
-    var isShapeHandle: Bool {
-        Self.shapeCases.contains(self)
-    }
-
-    var cursor: NSCursor {
-        switch self {
-        case .topLeft:
-            return .frameResize(position: .topLeft, directions: .all)
-        case .top:
-            return .resizeUpDown
-        case .topRight:
-            return .frameResize(position: .topRight, directions: .all)
-        case .right:
-            return .resizeLeftRight
-        case .bottomRight:
-            return .frameResize(position: .bottomRight, directions: .all)
-        case .bottom:
-            return .resizeUpDown
-        case .bottomLeft:
-            return .frameResize(position: .bottomLeft, directions: .all)
-        case .left:
-            return .resizeLeftRight
-        case .start, .control, .end:
-            return .editorMove
-        }
-    }
-
-    var movesLeft: Bool {
-        self == .topLeft || self == .bottomLeft || self == .left
-    }
-
-    var movesRight: Bool {
-        self == .topRight || self == .bottomRight || self == .right
-    }
-
-    var movesBottom: Bool {
-        self == .bottomLeft || self == .bottom || self == .bottomRight
-    }
-
-    var movesTop: Bool {
-        self == .topLeft || self == .top || self == .topRight
-    }
-
-    func point(in rect: CGRect) -> CGPoint {
-        switch self {
-        case .topLeft:
-            return CGPoint(x: rect.minX, y: rect.maxY)
-        case .top:
-            return CGPoint(x: rect.midX, y: rect.maxY)
-        case .topRight:
-            return CGPoint(x: rect.maxX, y: rect.maxY)
-        case .right:
-            return CGPoint(x: rect.maxX, y: rect.midY)
-        case .bottomRight:
-            return CGPoint(x: rect.maxX, y: rect.minY)
-        case .bottom:
-            return CGPoint(x: rect.midX, y: rect.minY)
-        case .bottomLeft:
-            return CGPoint(x: rect.minX, y: rect.minY)
-        case .left:
-            return CGPoint(x: rect.minX, y: rect.midY)
-        case .start, .control, .end:
-            return .zero
-        }
-    }
-}
-
-private extension OverlayAnnotationHandle {
-    init(arrowHandle: AnnotationArrowHandle) {
-        switch arrowHandle {
-        case .start: self = .start
-        case .control: self = .control
-        case .end: self = .end
-        }
-    }
-
-    var arrowHandle: AnnotationArrowHandle? {
-        switch self {
-        case .start: return .start
-        case .control: return .control
-        case .end: return .end
-        default: return nil
         }
     }
 }
