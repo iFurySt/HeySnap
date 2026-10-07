@@ -110,8 +110,8 @@ private final class AreaSelectionSession {
     private var markupTool: OverlayMarkupTool = .select
     private var propertyTool: OverlayMarkupTool?
     private var hoveredPropertyIndex: Int?
-    private var currentMarkupColor: NSColor = .systemRed
-    private var currentMarkupLineWidth: CGFloat = 3
+    private var currentMarkupColor: NSColor = AnnotationDefaults.color
+    private var currentMarkupLineWidth: CGFloat = AnnotationDefaults.lineWidth
     private var currentMarkupFontSize: CGFloat = 18
     private var currentMosaicIntensity: CGFloat = 0.5
     private var currentHighlightOpacity: CGFloat = 0.5
@@ -253,7 +253,9 @@ private final class AreaSelectionSession {
 
     func markupPropertyBarRect(in screenFrame: CGRect) -> CGRect? {
         guard propertyTool != nil, let markupBarRect else { return nil }
-        let size = CGSize(width: 330, height: 42)
+        let size = propertyTool?.usesStrokeWidthDots == true
+            ? QuickMarkupPropertyBarLayout(sizeCount: AnnotationDefaults.quickMarkupLineWidths.count).size
+            : CGSize(width: 330, height: 42)
         let gap: CGFloat = 8
         let globalScreenFrame = NSScreen.screens.first(where: { $0.frame.intersects(markupBarRect) })?.frame ?? screenFrame
         let x = min(max(markupBarRect.midX - size.width / 2, globalScreenFrame.minX + 8), globalScreenFrame.maxX - size.width - 8)
@@ -394,7 +396,7 @@ private final class AreaSelectionSession {
         if let activeAnnotationHandle, let selectedMarkupAnnotationID {
             markupAnnotations = markupAnnotations.map { annotation in
                 annotation.id == selectedMarkupAnnotationID
-                    ? annotation.updating(handle: activeAnnotationHandle, to: clampedAnnotationPoint(globalPoint))
+                    ? annotation.updating(handle: activeAnnotationHandle, to: annotation.tool == .arrow ? globalPoint : clampedAnnotationPoint(globalPoint))
                     : annotation
             }
             refreshOverlays()
@@ -406,7 +408,9 @@ private final class AreaSelectionSession {
             let dy = globalPoint.y - start.y
             markupAnnotations = markupAnnotations.map { annotation in
                 annotation.id == movingAnnotationID
-                    ? movingAnnotationOrigin.offsetBy(dx: dx, dy: dy).clamped(to: markupRect ?? movingAnnotationOrigin.rect)
+                    ? (movingAnnotationOrigin.tool == .arrow
+                        ? movingAnnotationOrigin.offsetBy(dx: dx, dy: dy)
+                        : movingAnnotationOrigin.offsetBy(dx: dx, dy: dy).clamped(to: markupRect ?? movingAnnotationOrigin.rect))
                     : annotation
             }
             refreshOverlays()
@@ -713,12 +717,14 @@ private final class AreaSelectionSession {
     }
 
     private func nearestLineWidthDotValue(to value: CGFloat) -> CGFloat {
-        [2, 4, 7].min { abs($0 - value) < abs($1 - value) } ?? 4
+        AnnotationDefaults.quickMarkupLineWidths.min { abs($0 - value) < abs($1 - value) } ?? AnnotationDefaults.lineWidth
     }
 
     private func propertyBarRectGlobal() -> CGRect? {
         guard propertyTool != nil, let markupBarRect else { return nil }
-        let size = CGSize(width: 330, height: 42)
+        let size = propertyTool?.usesStrokeWidthDots == true
+            ? QuickMarkupPropertyBarLayout(sizeCount: AnnotationDefaults.quickMarkupLineWidths.count).size
+            : CGSize(width: 330, height: 42)
         let gap: CGFloat = 8
         let screenFrame = NSScreen.screens.first(where: { $0.frame.intersects(markupBarRect) })?.frame
             ?? NSScreen.main?.frame
@@ -753,7 +759,7 @@ private final class AreaSelectionSession {
             refreshOverlays()
             return
         }
-        let swatches: [NSColor] = [.systemRed, .systemYellow, .systemGreen, .systemBlue, .black, .systemGray, .white]
+        let swatches: [NSColor] = [AnnotationDefaults.color, .systemYellow, .systemGreen, .systemBlue, .black, .systemGray, .white]
         if relativeX < 190 {
             let index = min(max(Int(relativeX / 26), 0), swatches.count - 1)
             currentMarkupColor = swatches[index]
@@ -763,11 +769,11 @@ private final class AreaSelectionSession {
             if propertyTool == .text {
                 values = [12, 16, 20, 28]
             } else if propertyTool?.usesStrokeWidthDots == true {
-                values = [2, 4, 7]
+                values = AnnotationDefaults.quickMarkupLineWidths
             } else {
-                values = [2, 4, 7]
+                values = AnnotationDefaults.quickMarkupLineWidths
             }
-            let index = min(max(Int((relativeX - 198) / 32), 0), values.count - 1)
+            guard let index = QuickMarkupPropertyBarLayout(sizeCount: values.count).sizeIndex(at: globalPoint, in: rect) else { return }
             if propertyTool == .text {
                 currentMarkupFontSize = values[index]
             } else {
@@ -818,13 +824,8 @@ private final class AreaSelectionSession {
             return
         }
 
-        let relativeX = point.x - rect.minX
-        guard relativeX >= 198 else {
-            hoveredPropertyIndex = nil
-            return
-        }
-        let index = Int((relativeX - 198) / 32)
-        hoveredPropertyIndex = (0...2).contains(index) ? index : nil
+        hoveredPropertyIndex = QuickMarkupPropertyBarLayout(sizeCount: AnnotationDefaults.quickMarkupLineWidths.count)
+            .sizeIndex(at: point, in: rect)
     }
 
     private func updateBarHover(at point: CGPoint) {
@@ -1090,7 +1091,14 @@ private final class AreaSelectionSession {
 
     private func hitAnnotationHandle(at point: CGPoint) -> (id: UUID, handle: OverlayAnnotationHandle, annotation: OverlayMarkupAnnotation)? {
         let radius: CGFloat = 10
-        for annotation in markupAnnotations.reversed() where annotation.id == selectedMarkupAnnotationID {
+        for annotation in markupAnnotations.reversed() {
+            if annotation.tool == .arrow {
+                if let handle = annotation.arrowGeometry.hitHandle(at: point) {
+                    return (annotation.id, OverlayAnnotationHandle(arrowHandle: handle), annotation)
+                }
+                continue
+            }
+            guard annotation.id == selectedMarkupAnnotationID else { continue }
             for (handle, anchor) in annotation.handlePoints {
                 if abs(point.x - anchor.x) <= radius && abs(point.y - anchor.y) <= radius {
                     return (annotation.id, handle, annotation)
@@ -1103,7 +1111,9 @@ private final class AreaSelectionSession {
     private func hitAnnotation(at point: CGPoint) -> UUID? {
         for annotation in markupAnnotations.reversed() {
             switch annotation.tool {
-            case .arrow, .line:
+            case .arrow:
+                if annotation.arrowGeometry.hit(at: point, width: annotation.lineWidth, curved: false) { return annotation.id }
+            case .line:
                 if distanceFromPoint(point, toLineStart: annotation.start, end: annotation.end) <= 9 {
                     return annotation.id
                 }
@@ -1152,7 +1162,7 @@ private final class AreaSelectionSession {
         }
 
         if let hit = hitAnnotationHandle(at: point) {
-            return hit.handle.cursor(for: hit.annotation)
+            return hit.handle.cursor
         }
 
         if hitAnnotation(at: point) != nil {
@@ -1706,64 +1716,20 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
         shape.stroke()
     }
 
-    private func drawArrow(from start: CGPoint, to end: CGPoint) {
-        let path = NSBezierPath()
-        path.move(to: start)
-        path.line(to: end)
-        path.lineWidth = 3
-        NSColor.systemRed.setStroke()
-        path.stroke()
-
-        let angle = atan2(end.y - start.y, end.x - start.x)
-        let length: CGFloat = 18
-        let spread: CGFloat = 0.55
-        let left = CGPoint(x: end.x - cos(angle - spread) * length, y: end.y - sin(angle - spread) * length)
-        let right = CGPoint(x: end.x - cos(angle + spread) * length, y: end.y - sin(angle + spread) * length)
-        let head = NSBezierPath()
-        head.move(to: end)
-        head.line(to: left)
-        head.move(to: end)
-        head.line(to: right)
-        head.lineWidth = 3
-        NSColor.systemRed.setStroke()
-        head.stroke()
-    }
-
     private func drawCurvedArrow(_ annotation: OverlayMarkupAnnotation) {
-        let control = annotation.control ?? annotation.defaultControl
-        let path = NSBezierPath()
-        path.move(to: annotation.start)
-        path.curve(to: annotation.end, controlPoint1: control, controlPoint2: control)
-        path.lineWidth = annotation.lineWidth
-        annotation.color.setStroke()
-        path.stroke()
-
-        let tangent = CGPoint(x: annotation.end.x - control.x, y: annotation.end.y - control.y)
-        let angle = atan2(tangent.y, tangent.x)
-        let length: CGFloat = 18
-        let spread: CGFloat = 0.55
-        let left = CGPoint(x: annotation.end.x - cos(angle - spread) * length, y: annotation.end.y - sin(angle - spread) * length)
-        let right = CGPoint(x: annotation.end.x - cos(angle + spread) * length, y: annotation.end.y - sin(angle + spread) * length)
-        let head = NSBezierPath()
-        head.move(to: annotation.end)
-        head.line(to: left)
-        head.move(to: annotation.end)
-        head.line(to: right)
-        head.lineWidth = annotation.lineWidth
-        annotation.color.setStroke()
-        head.stroke()
+        AnnotationArrowRenderer.draw(
+            start: annotation.start,
+            control: annotation.control ?? annotation.defaultControl,
+            end: annotation.end,
+            color: annotation.color,
+            width: annotation.lineWidth
+        )
     }
 
     private func drawSelectedAnnotationHandles() {
         guard let annotation = session?.selectedMarkupAnnotation(in: screenFrame) else { return }
         for (_, point) in annotation.handlePoints {
-            let rect = CGRect(x: point.x - 5.5, y: point.y - 5.5, width: 11, height: 11)
-            let path = NSBezierPath(ovalIn: rect)
-            NSColor.white.setFill()
-            path.fill()
-            NSColor.controlAccentColor.setStroke()
-            path.lineWidth = 1.5
-            path.stroke()
+            AnnotationArrowGeometry.drawHandle(at: point)
         }
     }
 
@@ -1858,7 +1824,7 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
             return
         }
 
-        let swatches: [NSColor] = [.systemRed, .systemYellow, .systemGreen, .systemBlue, .black, .systemGray, .white]
+        let swatches: [NSColor] = [AnnotationDefaults.color, .systemYellow, .systemGreen, .systemBlue, .black, .systemGray, .white]
         for (index, color) in swatches.enumerated() {
             let center = CGPoint(x: rect.minX + 14 + CGFloat(index) * 26, y: rect.midY)
             let swatchRect = CGRect(x: center.x - 8, y: center.y - 8, width: 16, height: 16)
@@ -1882,11 +1848,11 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
         separator.stroke()
 
         if session?.activePropertyTool?.usesStrokeWidthDots == true {
-            let widthValues: [CGFloat] = [2, 4, 7]
+            let widthValues: [CGFloat] = AnnotationDefaults.quickMarkupLineWidths
             let dotSizes: [CGFloat] = [6, 10, 14]
             for (index, dotSize) in dotSizes.enumerated() {
-                let itemRect = CGRect(x: rect.minX + 198 + CGFloat(index) * 32, y: rect.minY + 6, width: 28, height: rect.height - 12)
-                let isSelected = abs((session?.currentPropertyLineWidth ?? 3) - widthValues[index]) < 0.5
+                let itemRect = QuickMarkupPropertyBarLayout(sizeCount: widthValues.count).itemRect(at: index, in: rect)
+                let isSelected = abs((session?.currentPropertyLineWidth ?? AnnotationDefaults.lineWidth) - widthValues[index]) < 0.5
                 let isHovering = session?.currentPropertyHoverIndex == index
                 let displaySize = isHovering && !isSelected ? dotSize + 2 : dotSize
                 let dotRect = CGRect(
@@ -1907,7 +1873,7 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
         } else {
             let labels = session?.activePropertyTool == .text ? ["12", "16", "20", "28"] : ["2", "3", "5", "8"]
             for (index, label) in labels.enumerated() {
-                let itemRect = CGRect(x: rect.minX + 198 + CGFloat(index) * 32, y: rect.minY + 6, width: 28, height: rect.height - 12)
+                let itemRect = QuickMarkupPropertyBarLayout(sizeCount: labels.count).itemRect(at: index, in: rect)
                 NSColor.labelColor.withAlphaComponent(0.08).setFill()
                 NSBezierPath(roundedRect: itemRect, xRadius: 6, yRadius: 6).fill()
                 NSString(string: label).draw(in: itemRect.insetBy(dx: 0, dy: 6), withAttributes: [
@@ -2142,13 +2108,7 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
     }
 
     private func drawCheckmark(centeredAt center: CGPoint, over color: NSColor) {
-        let check = NSBezierPath()
-        check.move(to: CGPoint(x: center.x - 4, y: center.y))
-        check.line(to: CGPoint(x: center.x - 1, y: center.y - 3))
-        check.line(to: CGPoint(x: center.x + 5, y: center.y + 4))
-        check.lineCapStyle = .round
-        check.lineJoinStyle = .round
-        check.lineWidth = 2
+        let check = QuickMarkupPropertyBarIcons.colorCheckmark(centeredAt: center)
 
         checkmarkColor(over: color).setStroke()
         check.stroke()
@@ -2588,8 +2548,8 @@ struct OverlayMarkupAnnotation {
         start: CGPoint,
         end: CGPoint,
         control: CGPoint? = nil,
-        color: NSColor = .systemRed,
-        lineWidth: CGFloat = 3,
+        color: NSColor = AnnotationDefaults.color,
+        lineWidth: CGFloat = AnnotationDefaults.lineWidth,
         fontSize: CGFloat = 18,
         text: String = "",
         mosaicIntensity: CGFloat = 0.5,
@@ -2611,7 +2571,8 @@ struct OverlayMarkupAnnotation {
     }
 
     var rect: CGRect {
-        CGRect(
+        if tool == .arrow { return arrowGeometry.bounds }
+        return CGRect(
             x: min(start.x, end.x),
             y: min(start.y, end.y),
             width: abs(end.x - start.x),
@@ -2634,14 +2595,14 @@ struct OverlayMarkupAnnotation {
         }
     }
 
+    var arrowGeometry: AnnotationArrowGeometry {
+        AnnotationArrowGeometry(start: start, control: control ?? defaultControl, end: end)
+    }
+
     var handlePoints: [(OverlayAnnotationHandle, CGPoint)] {
         switch tool {
         case .arrow:
-            return [
-                (.start, start),
-                (.control, control ?? defaultControl),
-                (.end, end)
-            ]
+            return arrowGeometry.handles.map { (OverlayAnnotationHandle(arrowHandle: $0.0), $0.1) }
         case .line:
             return [
                 (.start, start),
@@ -2659,15 +2620,7 @@ struct OverlayMarkupAnnotation {
         let steps = 24
         switch tool {
         case .arrow:
-            let control = control ?? defaultControl
-            return (0...steps).map { step in
-                let t = CGFloat(step) / CGFloat(steps)
-                let oneMinusT = 1 - t
-                return CGPoint(
-                    x: oneMinusT * oneMinusT * start.x + 2 * oneMinusT * t * control.x + t * t * end.x,
-                    y: oneMinusT * oneMinusT * start.y + 2 * oneMinusT * t * control.y + t * t * end.y
-                )
-            }
+            return AnnotationArrowRenderer.centerline(start: start, control: control ?? defaultControl, end: end, curved: false).map(\.point)
         case .line:
             return (0...steps).map { step in
                 let t = CGFloat(step) / CGFloat(steps)
@@ -2705,6 +2658,10 @@ struct OverlayMarkupAnnotation {
     }
 
     func updating(handle: OverlayAnnotationHandle, to point: CGPoint) -> OverlayMarkupAnnotation {
+        if tool == .arrow, let arrowHandle = handle.arrowHandle {
+            let geometry = arrowGeometry.updating(arrowHandle, to: point)
+            return copy(start: geometry.start, end: geometry.end, control: geometry.control)
+        }
         if handle.isShapeHandle {
             return updatingRect(resizedRect(handle: handle, to: point))
         }
@@ -2738,7 +2695,11 @@ struct OverlayMarkupAnnotation {
     }
 
     func offsetBy(dx: CGFloat, dy: CGFloat) -> OverlayMarkupAnnotation {
-        copy(
+        if tool == .arrow {
+            let geometry = arrowGeometry.offsetBy(dx: dx, dy: dy)
+            return copy(start: geometry.start, end: geometry.end, control: geometry.control)
+        }
+        return copy(
             start: CGPoint(x: start.x + dx, y: start.y + dy),
             end: CGPoint(x: end.x + dx, y: end.y + dy),
             control: control.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }
@@ -2800,22 +2761,6 @@ struct OverlayMarkupAnnotation {
         CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2)
     }
 
-    func directionalCursor(for handle: OverlayAnnotationHandle) -> NSCursor {
-        let vector: CGPoint
-        switch handle {
-        case .control:
-            vector = CGPoint(x: end.x - start.x, y: end.y - start.y)
-        case .start:
-            vector = CGPoint(x: (control ?? defaultControl).x - start.x, y: (control ?? defaultControl).y - start.y)
-        case .end:
-            vector = CGPoint(x: end.x - (control ?? defaultControl).x, y: end.y - (control ?? defaultControl).y)
-        default:
-            vector = CGPoint(x: end.x - start.x, y: end.y - start.y)
-        }
-
-        return abs(vector.x) >= abs(vector.y) ? .resizeLeftRight : .resizeUpDown
-    }
-
     private func clamp(_ point: CGPoint, to bounds: CGRect) -> CGPoint {
         CGPoint(
             x: min(max(point.x, bounds.minX), bounds.maxX),
@@ -2852,7 +2797,7 @@ enum OverlayAnnotationHandle {
         Self.shapeCases.contains(self)
     }
 
-    func cursor(for annotation: OverlayMarkupAnnotation? = nil) -> NSCursor {
+    var cursor: NSCursor {
         switch self {
         case .topLeft:
             return .frameResize(position: .topLeft, directions: .all)
@@ -2871,10 +2816,7 @@ enum OverlayAnnotationHandle {
         case .left:
             return .resizeLeftRight
         case .start, .control, .end:
-            guard let annotation else {
-                return .resizeLeftRight
-            }
-            return annotation.directionalCursor(for: self)
+            return .editorMove
         }
     }
 
@@ -2914,6 +2856,25 @@ enum OverlayAnnotationHandle {
             return CGPoint(x: rect.minX, y: rect.midY)
         case .start, .control, .end:
             return .zero
+        }
+    }
+}
+
+private extension OverlayAnnotationHandle {
+    init(arrowHandle: AnnotationArrowHandle) {
+        switch arrowHandle {
+        case .start: self = .start
+        case .control: self = .control
+        case .end: self = .end
+        }
+    }
+
+    var arrowHandle: AnnotationArrowHandle? {
+        switch self {
+        case .start: return .start
+        case .control: return .control
+        case .end: return .end
+        default: return nil
         }
     }
 }

@@ -112,46 +112,6 @@ private extension CGRect {
     }
 }
 
-extension NSCursor {
-    // A four-way move cursor. Built from an SF Symbol so we avoid the private
-    // `_moveCursor` selector (which crashed), falling back to openHand. The
-    // backing is a slightly larger rotated square behind the original glyph.
-    static let editorMove: NSCursor = {
-        let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
-        guard let symbol = NSImage(systemSymbolName: "arrow.up.and.down.and.arrow.left.and.right", accessibilityDescription: "Move")?
-            .withSymbolConfiguration(config) else {
-            return .openHand
-        }
-        let size = NSSize(width: 30, height: 30)
-        let image = NSImage(size: size)
-        image.lockFocus()
-
-        let center = CGPoint(x: size.width / 2, y: size.height / 2)
-        let backingSide: CGFloat = 23
-        let backing = NSBezierPath()
-        backing.move(to: CGPoint(x: center.x, y: center.y + backingSide / 2))
-        backing.line(to: CGPoint(x: center.x + backingSide / 2, y: center.y))
-        backing.line(to: CGPoint(x: center.x, y: center.y - backingSide / 2))
-        backing.line(to: CGPoint(x: center.x - backingSide / 2, y: center.y))
-        backing.close()
-        NSColor.white.withAlphaComponent(0.96).setFill()
-        backing.fill()
-        NSColor.black.withAlphaComponent(0.18).setStroke()
-        backing.lineWidth = 1
-        backing.stroke()
-
-        let symbolRect = NSRect(
-            x: (size.width - symbol.size.width) / 2,
-            y: (size.height - symbol.size.height) / 2,
-            width: symbol.size.width,
-            height: symbol.size.height
-        )
-        symbol.draw(in: symbolRect)
-        image.unlockFocus()
-        return NSCursor(image: image, hotSpot: NSPoint(x: center.x, y: center.y))
-    }()
-}
-
 private extension NSColor {
     var editorHexString: String {
         let color = usingColorSpace(.sRGB) ?? self
@@ -297,14 +257,14 @@ private enum EditorZoomCommand {
 
 private struct EditorPreferences: Codable {
     var selectedTool: String = "select"
-    var annotationColorHex: String = "#FF3B30"
-    var lineWidth: CGFloat = 5
+    var annotationColorHex: String = AnnotationDefaults.colorHex
+    var lineWidth: CGFloat = AnnotationDefaults.lineWidth
     var arrowStyle: String = "single"
     var arrowCurved: Bool = false
     var textFontSize: CGFloat = 12
     var textFilled: Bool = false
-    var textColorHex: String = "#FF3B30"
-    var textFillColorHex: String = "#FF3B30"
+    var textColorHex: String = AnnotationDefaults.colorHex
+    var textFillColorHex: String = AnnotationDefaults.colorHex
 }
 
 private enum EditorPreferencesStore {
@@ -1167,14 +1127,14 @@ private final class EditorScrollView: NSScrollView {
 private final class ArrowPropertyBar: NSVisualEffectView {
     var onColorChange: ((NSColor) -> Void)?
     var onLineWidthChange: ((CGFloat) -> Void)?
-    var onStyleChange: ((EditorArrowStyle) -> Void)?
+    var onStyleChange: ((AnnotationArrowStyle) -> Void)?
     var onCurvedChange: ((Bool) -> Void)?
 
     private let colorWell = NSColorWell()
     private let widthSlider = NSSlider(value: 5, minValue: 1, maxValue: 28, target: nil, action: nil)
     private let styleControl = NSSegmentedControl()
     private let curveToggle = NSButton(checkboxWithTitle: "Curve", target: nil, action: nil)
-    private let styles = EditorArrowStyle.allCases
+    private let styles = AnnotationArrowStyle.allCases
 
     init() {
         super.init(frame: .zero)
@@ -1194,7 +1154,7 @@ private final class ArrowPropertyBar: NSVisualEffectView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func configure(color: NSColor, lineWidth: CGFloat, style: EditorArrowStyle, curved: Bool) {
+    func configure(color: NSColor, lineWidth: CGFloat, style: AnnotationArrowStyle, curved: Bool) {
         colorWell.color = color
         widthSlider.doubleValue = Double(lineWidth)
         styleControl.selectedSegment = styles.firstIndex(of: style) ?? 0
@@ -1633,27 +1593,6 @@ private enum EditorTool: String, CaseIterable {
     }
 }
 
-private enum EditorArrowStyle: String, CaseIterable {
-    case single      // head at the end only
-    case double      // heads at both ends
-
-    var symbolName: String {
-        switch self {
-        case .single: return "arrow.right"
-        case .double: return "arrow.left.and.right"
-        }
-    }
-
-    var title: String {
-        switch self {
-        case .single: return "Single arrow"
-        case .double: return "Double arrow"
-        }
-    }
-
-    var hasEndHead: Bool { true }
-    var hasStartHead: Bool { self == .double }
-}
 
 private enum EditorAnnotationKind {
     case arrow(control: CGPoint)
@@ -1671,7 +1610,7 @@ private struct EditorAnnotation {
     var end: CGPoint
     var color: NSColor
     var lineWidth: CGFloat
-    var arrowStyle: EditorArrowStyle
+    var arrowStyle: AnnotationArrowStyle
     // When true, an arrow renders as a circular arc through start/mid/end;
     // otherwise it stays a straight (quadratic) shaft.
     var arrowCurved: Bool
@@ -1685,7 +1624,7 @@ private struct EditorAnnotation {
         end: CGPoint,
         color: NSColor,
         lineWidth: CGFloat,
-        arrowStyle: EditorArrowStyle = .single,
+        arrowStyle: AnnotationArrowStyle = .single,
         arrowCurved: Bool = false,
         textFontSize: CGFloat = 12,
         textFillColor: NSColor = .clear,
@@ -1705,12 +1644,8 @@ private struct EditorAnnotation {
     }
 
     var rect: CGRect {
-        if case .arrow(let control) = kind {
-            let minX = min(start.x, control.x, end.x)
-            let minY = min(start.y, control.y, end.y)
-            let maxX = max(start.x, control.x, end.x)
-            let maxY = max(start.y, control.y, end.y)
-            return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        if let geometry = arrowGeometry {
+            return geometry.bounds
         } else if case .line(let control) = kind {
             let minX = min(start.x, control.x, end.x)
             let minY = min(start.y, control.y, end.y)
@@ -1734,7 +1669,7 @@ private struct EditorAnnotation {
         copy.end.x += dx
         copy.end.y += dy
         if case .arrow(let control) = copy.kind {
-            copy.kind = .arrow(control: CGPoint(x: control.x + dx, y: control.y + dy))
+            copy.kind = .arrow(control: AnnotationArrowGeometry(start: start, control: control, end: end).offsetBy(dx: dx, dy: dy).control)
         } else if case .line(let control) = copy.kind {
             copy.kind = .line(control: CGPoint(x: control.x + dx, y: control.y + dy))
         }
@@ -1778,17 +1713,12 @@ private struct EditorAnnotation {
         return false
     }
 
-    // The point where the middle knob sits: the actual on-curve midpoint
-    // (quadratic at t=0.5), not the raw control point which floats off the line.
-    func arrowCurveMidpoint() -> CGPoint? {
-        guard case .arrow(let control) = kind else {
-            return nil
-        }
-        return CGPoint(
-            x: 0.25 * start.x + 0.5 * control.x + 0.25 * end.x,
-            y: 0.25 * start.y + 0.5 * control.y + 0.25 * end.y
-        )
+    var arrowGeometry: AnnotationArrowGeometry? {
+        guard case .arrow(let control) = kind else { return nil }
+        return AnnotationArrowGeometry(start: start, control: control, end: end)
     }
+
+    func arrowCurveMidpoint() -> CGPoint? { arrowGeometry?.midpoint }
 
     func lineCurveMidpoint() -> CGPoint? {
         guard case .line(let control) = kind else {
@@ -1800,26 +1730,16 @@ private struct EditorAnnotation {
         )
     }
 
-    func updatingArrowHandle(_ handle: EditorArrowHandle, to point: CGPoint) -> EditorAnnotation {
+    func updatingArrowHandle(_ handle: AnnotationArrowHandle, to point: CGPoint) -> EditorAnnotation {
+        guard let geometry = arrowGeometry?.updating(handle, to: point) else { return self }
         var copy = self
-        switch handle {
-        case .start:
-            copy.start = point
-        case .control:
-            // `point` is the desired on-curve midpoint; solve the control point
-            // so the curve passes through it, keeping the knob on the line.
-            let control = CGPoint(
-                x: 2 * point.x - 0.5 * (copy.start.x + copy.end.x),
-                y: 2 * point.y - 0.5 * (copy.start.y + copy.end.y)
-            )
-            copy.kind = .arrow(control: control)
-        case .end:
-            copy.end = point
-        }
+        copy.start = geometry.start
+        copy.end = geometry.end
+        copy.kind = .arrow(control: geometry.control)
         return copy
     }
 
-    func updatingLineHandle(_ handle: EditorArrowHandle, to point: CGPoint) -> EditorAnnotation {
+    func updatingLineHandle(_ handle: AnnotationArrowHandle, to point: CGPoint) -> EditorAnnotation {
         var copy = self
         switch handle {
         case .start:
@@ -1857,12 +1777,6 @@ private struct EditorAnnotation {
             return true
         }
     }
-}
-
-private enum EditorArrowHandle {
-    case start
-    case control
-    case end
 }
 
 // The eight resize handles of a crop selection (4 corners + 4 edge midpoints).
@@ -2019,9 +1933,9 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
             onSelectionChange?(selectedTool)
         }
     }
-    var currentColor: NSColor = .systemRed
-    var lineWidth: CGFloat = 5
-    var currentArrowStyle: EditorArrowStyle = .single
+    var currentColor: NSColor = AnnotationDefaults.color
+    var lineWidth: CGFloat = AnnotationDefaults.lineWidth
+    var currentArrowStyle: AnnotationArrowStyle = .single
     var currentArrowCurved: Bool = false
     var currentTextFontSize: CGFloat = 12
     var currentTextFillColor: NSColor = .clear
@@ -2039,7 +1953,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     struct ArrowContext {
         var color: NSColor
         var lineWidth: CGFloat
-        var style: EditorArrowStyle
+        var style: AnnotationArrowStyle
         var curved: Bool
     }
 
@@ -2068,7 +1982,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
             window?.invalidateCursorRects(for: self)
         }
     }
-    private var activeArrowHandle: EditorArrowHandle?
+    private var activeArrowHandle: AnnotationArrowHandle?
     private var dragStart: CGPoint?
     private var dragCurrent: CGPoint?
     private var dragStartAnnotations: [EditorAnnotation]?
@@ -2151,11 +2065,11 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         if let tool = EditorTool(rawValue: editorPreferences.selectedTool) {
             selectedTool = tool
         }
-        let annotationColor = NSColor(editorHexString: editorPreferences.annotationColorHex) ?? .systemRed
+        let annotationColor = NSColor(editorHexString: editorPreferences.annotationColorHex) ?? AnnotationDefaults.color
         let textColor = NSColor(editorHexString: editorPreferences.textColorHex) ?? annotationColor
         currentColor = selectedTool == .text ? textColor : annotationColor
         lineWidth = editorPreferences.lineWidth
-        currentArrowStyle = EditorArrowStyle(rawValue: editorPreferences.arrowStyle) ?? .single
+        currentArrowStyle = AnnotationArrowStyle(rawValue: editorPreferences.arrowStyle) ?? .single
         currentArrowCurved = editorPreferences.arrowCurved
         currentTextFontSize = editorPreferences.textFontSize
         currentTextFillColor = editorPreferences.textFilled
@@ -2206,7 +2120,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         } else {
             currentColor = NSColor(editorHexString: editorPreferences.annotationColorHex) ?? currentColor
             lineWidth = editorPreferences.lineWidth
-            currentArrowStyle = EditorArrowStyle(rawValue: editorPreferences.arrowStyle) ?? currentArrowStyle
+            currentArrowStyle = AnnotationArrowStyle(rawValue: editorPreferences.arrowStyle) ?? currentArrowStyle
             currentArrowCurved = editorPreferences.arrowCurved
         }
         persistSelectedTool()
@@ -2349,7 +2263,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         editSelectedArrow(name: "Arrow Thickness") { $0.lineWidth = width }
     }
 
-    func applyArrowStyle(_ style: EditorArrowStyle) {
+    func applyArrowStyle(_ style: AnnotationArrowStyle) {
         currentArrowStyle = style
         persistArrowDefaults()
         editSelectedArrow(name: "Arrow Style") { $0.arrowStyle = style }
@@ -3309,190 +3223,12 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         }
     }
 
-    private func drawCurvedArrow(start: CGPoint, control: CGPoint, end: CGPoint, color: NSColor, width: CGFloat, style: EditorArrowStyle, curved: Bool) {
-        let samples = arrowCenterline(start: start, control: control, end: end, curved: curved)
-        guard samples.count >= 2 else { return }
-
-        color.setFill()
-
-        let minHalf = max(1.4, width * 0.34)
-        let maxHalf = width * 0.72
-        func halfWidth(_ t: CGFloat) -> CGFloat {
-            switch style {
-            case .single: return minHalf + (maxHalf - minHalf) * t
-            case .double: return minHalf + (maxHalf - minHalf) * (abs(t - 0.5) * 2)
-            }
-        }
-
-        let headLength = max(14, width * 4.6)
-        let headHalfWidth = max(6, width * 2.4)
-
-        // Build the arrow as ONE connected polygon: the tapered shaft's left edge,
-        // then the head barb/tip/barb, then the shaft's right edge back. The shaft
-        // ends at the exact interpolated arc point where the head base sits, and
-        // the barbs start from that same point — so the head and shaft share an
-        // edge and can never gap or turn into a diamond, at any curvature or width.
-        // Verified by rendering a grid of arrows across angles/curvatures.
-        let endBase = style.hasEndHead ? sampleAtArcLength(headLength, in: samples, fromEnd: true) : nil
-        let startBase = style.hasStartHead ? sampleAtArcLength(headLength, in: samples, fromEnd: false) : nil
-
-        // Shaft samples between the two base cut points, with the exact base
-        // samples appended so the ribbon reaches precisely to the head.
-        let startT = startBase?.t ?? 0
-        let endT = endBase?.t ?? 1
-        var shaft = samples.filter { $0.t >= startT && $0.t <= endT }
-        if let startBase, shaft.first?.t != startBase.t { shaft.insert(startBase, at: 0) }
-        if let endBase, shaft.last?.t != endBase.t { shaft.append(endBase) }
-        guard shaft.count >= 2 else { return }
-
-        func leftPoint(_ s: ArrowSample) -> CGPoint {
-            CGPoint(x: s.point.x - s.tangent.y * halfWidth(s.t), y: s.point.y + s.tangent.x * halfWidth(s.t))
-        }
-        func rightPoint(_ s: ArrowSample) -> CGPoint {
-            CGPoint(x: s.point.x + s.tangent.y * halfWidth(s.t), y: s.point.y - s.tangent.x * halfWidth(s.t))
-        }
-        func barbs(tip: CGPoint, base: CGPoint) -> (left: CGPoint, right: CGPoint) {
-            let ax = tip.x - base.x, ay = tip.y - base.y
-            let len = max(hypot(ax, ay), 0.0001)
-            let perp = CGPoint(x: -ay / len, y: ax / len)
-            return (CGPoint(x: base.x + perp.x * headHalfWidth, y: base.y + perp.y * headHalfWidth),
-                    CGPoint(x: base.x - perp.x * headHalfWidth, y: base.y - perp.y * headHalfWidth))
-        }
-
-        let path = NSBezierPath()
-
-        // Tail head (double style): tip -> its right barb -> into the shaft left edge.
-        if let startBase {
-            let tip = samples[0].point
-            let b = barbs(tip: tip, base: startBase.point)
-            path.move(to: tip)
-            path.line(to: b.right)
-        } else {
-            path.move(to: leftPoint(shaft[0]))
-        }
-
-        // Left edge forward.
-        for s in shaft.dropFirst() { path.line(to: leftPoint(s)) }
-
-        // End head.
-        if let endBase {
-            let tip = samples[samples.count - 1].point
-            let b = barbs(tip: tip, base: endBase.point)
-            path.line(to: b.left)
-            path.line(to: tip)
-            path.line(to: b.right)
-        }
-
-        // Right edge back.
-        for s in shaft.reversed() { path.line(to: rightPoint(s)) }
-
-        // Close the tail head.
-        if let startBase {
-            let tip = samples[0].point
-            let b = barbs(tip: tip, base: startBase.point)
-            path.line(to: b.left)
-        }
-
-        path.close()
-        path.fill()
+    private func drawCurvedArrow(start: CGPoint, control: CGPoint, end: CGPoint, color: NSColor, width: CGFloat, style: AnnotationArrowStyle, curved: Bool) {
+        AnnotationArrowRenderer.draw(start: start, control: control, end: end, color: color, width: width, style: style, curved: curved)
     }
 
-    // Returns the interpolated sample at `distance` arc length from the tip (or
-    // tail) along the real centerline.
-    private func sampleAtArcLength(_ distance: CGFloat, in samples: [ArrowSample], fromEnd: Bool) -> ArrowSample {
-        guard samples.count >= 2 else {
-            return fromEnd ? samples[samples.count - 1] : samples[0]
-        }
-        var accumulated: CGFloat = 0
-        let order = fromEnd ? Array(stride(from: samples.count - 1, through: 1, by: -1)) : Array(0...(samples.count - 2))
-        for i in order {
-            let j = fromEnd ? i - 1 : i + 1
-            let seg = hypot(samples[j].point.x - samples[i].point.x, samples[j].point.y - samples[i].point.y)
-            if accumulated + seg >= distance {
-                let f = seg > 0 ? (distance - accumulated) / seg : 0
-                let p = CGPoint(
-                    x: samples[i].point.x + (samples[j].point.x - samples[i].point.x) * f,
-                    y: samples[i].point.y + (samples[j].point.y - samples[i].point.y) * f
-                )
-                let t = samples[i].t + (samples[j].t - samples[i].t) * f
-                return ArrowSample(point: p, tangent: samples[i].tangent, t: t)
-            }
-            accumulated += seg
-        }
-        return fromEnd ? samples[0] : samples[samples.count - 1]
-    }
-
-    private struct ArrowSample {
-        var point: CGPoint
-        var tangent: CGPoint   // unit tangent pointing start -> end
-        var t: CGFloat         // 0...1 along the centerline
-    }
-
-    // Samples the arrow centerline. Curved mode fits a circle through start, the
-    // on-curve midpoint, and end; otherwise it uses
-    // the quadratic through the control point.
-    private func arrowCenterline(start: CGPoint, control: CGPoint, end: CGPoint, curved: Bool) -> [ArrowSample] {
-        let steps = 64
-        let mid = CGPoint(
-            x: 0.25 * start.x + 0.5 * control.x + 0.25 * end.x,
-            y: 0.25 * start.y + 0.5 * control.y + 0.25 * end.y
-        )
-
-        // Circle fit through the three points.
-        let d = 2 * (start.x * (mid.y - end.y) + mid.x * (end.y - start.y) + end.x * (start.y - mid.y))
-
-        var samples: [ArrowSample] = []
-        samples.reserveCapacity(steps + 1)
-
-        if !curved || abs(d) < 0.0001 {
-            for i in 0...steps {
-                let t = CGFloat(i) / CGFloat(steps)
-                let p = quadraticPoint(start: start, control: control, end: end, t: t)
-                let dx = 2 * (1 - t) * (control.x - start.x) + 2 * t * (end.x - control.x)
-                let dy = 2 * (1 - t) * (control.y - start.y) + 2 * t * (end.y - control.y)
-                let len = max(hypot(dx, dy), 0.0001)
-                samples.append(ArrowSample(point: p, tangent: CGPoint(x: dx / len, y: dy / len), t: t))
-            }
-            return samples
-        }
-
-        let sq = { (p: CGPoint) in p.x * p.x + p.y * p.y }
-        let s2 = sq(start), m2 = sq(mid), e2 = sq(end)
-        let center = CGPoint(
-            x: (s2 * (mid.y - end.y) + m2 * (end.y - start.y) + e2 * (start.y - mid.y)) / d,
-            y: (s2 * (end.x - mid.x) + m2 * (start.x - end.x) + e2 * (mid.x - start.x)) / d
-        )
-        let radius = hypot(start.x - center.x, start.y - center.y)
-        let a0 = atan2(start.y - center.y, start.x - center.x)
-        let am = atan2(mid.y - center.y, mid.x - center.x)
-        let a2 = atan2(end.y - center.y, end.x - center.x)
-
-        // Choose the sweep direction that passes through the midpoint.
-        func normalize(_ a: CGFloat) -> CGFloat {
-            var x = a
-            while x < 0 { x += 2 * .pi }
-            while x >= 2 * .pi { x -= 2 * .pi }
-            return x
-        }
-        let base = normalize(a0)
-        let relMid = normalize(am - base)
-        var relEnd = normalize(a2 - base)
-        // If the midpoint isn't between start and end going CCW, sweep the other way.
-        let clockwise = relMid > relEnd
-        if clockwise {
-            relEnd = relEnd - 2 * .pi
-        }
-        for i in 0...steps {
-            let t = CGFloat(i) / CGFloat(steps)
-            let angle = base + relEnd * t
-            let p = CGPoint(x: center.x + radius * cos(angle), y: center.y + radius * sin(angle))
-            // Tangent is the radius rotated 90 deg in the sweep direction.
-            let sweepSign: CGFloat = relEnd >= 0 ? 1 : -1
-            let tx = -sin(angle) * sweepSign
-            let ty = cos(angle) * sweepSign
-            samples.append(ArrowSample(point: p, tangent: CGPoint(x: tx, y: ty), t: t))
-        }
-        return samples
+    private func arrowCenterline(start: CGPoint, control: CGPoint, end: CGPoint, curved: Bool) -> [AnnotationArrowRenderer.ArrowSample] {
+        AnnotationArrowRenderer.centerline(start: start, control: control, end: end, curved: curved)
     }
 
     private func drawLine(from start: CGPoint, to end: CGPoint, color: NSColor, width: CGFloat, arrowHead: Bool) {
@@ -3537,14 +3273,10 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     }
 
     private func drawArrowHandles(for annotation: EditorAnnotation) {
-        guard let midpoint = annotation.arrowCurveMidpoint() else {
-            return
+        guard let geometry = annotation.arrowGeometry else { return }
+        for (_, point) in geometry.handles {
+            AnnotationArrowGeometry.drawHandle(at: point, magnification: currentMagnification)
         }
-
-        // Three uniform knobs: start, on-curve middle, end.
-        drawEditorHandle(at: annotation.start)
-        drawEditorHandle(at: midpoint)
-        drawEditorHandle(at: annotation.end)
     }
 
     private func drawLineHandles(for annotation: EditorAnnotation) {
@@ -3566,14 +3298,7 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
     // rectangles/ovals later): a white disc with an accent-color ring, kept a
     // constant on-screen size regardless of zoom.
     private func drawEditorHandle(at point: CGPoint) {
-        let radius: CGFloat = 5.5 / currentMagnification
-        let rect = CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)
-        let path = NSBezierPath(ovalIn: rect)
-        NSColor.white.setFill()
-        path.fill()
-        NSColor.controlAccentColor.setStroke()
-        path.lineWidth = 1.5 / currentMagnification
-        path.stroke()
+        AnnotationArrowGeometry.drawHandle(at: point, magnification: currentMagnification)
     }
 
     private func drawText(
@@ -4322,16 +4047,8 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         let screenSlack = 10 / currentMagnification
         for annotation in annotations.reversed() {
             switch annotation.kind {
-            case .arrow(let control):
-                let tolerance = max(annotation.lineWidth, 0) + screenSlack
-                let samples = arrowCenterline(start: annotation.start, control: control, end: annotation.end, curved: annotation.arrowCurved)
-                var minDist = CGFloat.greatestFiniteMagnitude
-                for i in 0..<(samples.count - 1) {
-                    minDist = min(minDist, distance(point, toSegmentFrom: samples[i].point, to: samples[i + 1].point))
-                }
-                // Include the head area so the tip/barbs are grabbable too.
-                let headReach = max(6, annotation.lineWidth * 2.4) + screenSlack
-                if minDist <= tolerance || hypot(point.x - annotation.end.x, point.y - annotation.end.y) <= headReach {
+            case .arrow:
+                if annotation.arrowGeometry?.hit(at: point, width: annotation.lineWidth, curved: annotation.arrowCurved, magnification: currentMagnification) == true {
                     return annotation.id
                 }
             case .line(let control):
@@ -4400,35 +4117,23 @@ private final class ScreenshotEditorView: NSView, NSTextViewDelegate {
         }
     }
 
-    private func hitArrowHandle(at point: CGPoint) -> (annotationID: UUID, handle: EditorArrowHandle)? {
-        // Match the drawn handle size in screen space (with a little slack) so
-        // grabbing a handle is easy at any zoom level.
-        let radius: CGFloat = 11 / currentMagnification
+    private func hitArrowHandle(at point: CGPoint) -> (annotationID: UUID, handle: AnnotationArrowHandle)? {
         for annotation in annotations.reversed() {
-            guard let midpoint = annotation.arrowCurveMidpoint() else {
-                continue
-            }
-
-            let handles: [(EditorArrowHandle, CGPoint)] = [
-                (.start, annotation.start),
-                (.control, midpoint),
-                (.end, annotation.end)
-            ]
-            for (handle, handlePoint) in handles where hypot(point.x - handlePoint.x, point.y - handlePoint.y) <= radius {
+            if let handle = annotation.arrowGeometry?.hitHandle(at: point, magnification: currentMagnification) {
                 return (annotation.id, handle)
             }
         }
         return nil
     }
 
-    private func hitLineHandle(at point: CGPoint) -> (annotationID: UUID, handle: EditorArrowHandle)? {
+    private func hitLineHandle(at point: CGPoint) -> (annotationID: UUID, handle: AnnotationArrowHandle)? {
         let radius: CGFloat = 11 / currentMagnification
         for annotation in annotations.reversed() {
             guard let midpoint = annotation.lineCurveMidpoint() else {
                 continue
             }
 
-            let handles: [(EditorArrowHandle, CGPoint)] = [
+            let handles: [(AnnotationArrowHandle, CGPoint)] = [
                 (.start, annotation.start),
                 (.control, midpoint),
                 (.end, annotation.end)

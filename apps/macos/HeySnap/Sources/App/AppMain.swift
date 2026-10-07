@@ -713,7 +713,7 @@ private enum OverlayMarkupRenderer {
         case .arrow:
             let control = annotation.control.map { convert($0, region: region, scaleX: scaleX, scaleY: scaleY) }
                 ?? defaultControl(start: start, end: end)
-            drawArrow(from: start, control: control, to: end, width: lineWidth, color: annotation.color)
+            AnnotationArrowRenderer.draw(start: start, control: control, end: end, color: annotation.color, width: lineWidth, metricsScale: max(scaleX, scaleY))
         case .highlighter:
             drawSpotlight(annotation, rect: rect, imageSize: imageSize)
         case .text:
@@ -787,25 +787,6 @@ private enum OverlayMarkupRenderer {
         NSGraphicsContext.current?.imageInterpolation = .none
         small.draw(in: clipped)
         NSGraphicsContext.current?.imageInterpolation = .default
-    }
-
-    private static func drawArrow(from start: CGPoint, control: CGPoint, to end: CGPoint, width: CGFloat, color: NSColor) {
-        let shaft = NSBezierPath()
-        shaft.move(to: start)
-        shaft.curve(to: end, controlPoint1: control, controlPoint2: control)
-        stroke(shaft, width: width, color: color)
-
-        let angle = atan2(end.y - control.y, end.x - control.x)
-        let length = max(18, width * 5)
-        let spread: CGFloat = 0.55
-        let left = CGPoint(x: end.x - cos(angle - spread) * length, y: end.y - sin(angle - spread) * length)
-        let right = CGPoint(x: end.x - cos(angle + spread) * length, y: end.y - sin(angle + spread) * length)
-        let head = NSBezierPath()
-        head.move(to: end)
-        head.line(to: left)
-        head.move(to: end)
-        head.line(to: right)
-        stroke(head, width: width, color: color)
     }
 
     private static func defaultControl(start: CGPoint, end: CGPoint) -> CGPoint {
