@@ -69,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLogger.info("Application did finish launching.")
+        AppLogger.info("Running bundle path=\(Bundle.main.bundleURL.path), version=\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "unknown").")
         updateController.start()
         settings.onShortcutsChange = { [weak self] in
             self?.registerHotKey()
@@ -315,7 +316,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        pasteboard.setData(pngData, forType: .png)
+        guard pasteboard.setData(pngData, forType: .png) else {
+            screenshotService.publishStatus(.failure("Could not copy screenshot to clipboard"))
+            AppLogger.error("Quick markup clipboard write failed.")
+            NSSound.beep()
+            return
+        }
         screenshotService.publishStatus(.success("Copied screenshot to clipboard"))
         AppLogger.info("Quick markup region copied to clipboard.")
     }

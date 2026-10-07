@@ -30,7 +30,7 @@ struct CaptureCoordinateConverterTests {
         #expect(captureRect == CGRect(x: 20, y: 882, width: 200, height: 80))
     }
 
-    @Test("Conversion uses the screen with the largest selected area")
+    @Test("Unequal-height displays share the primary display origin")
     func conversionUsesDominantScreen() {
         let primary = CGRect(x: 0, y: 0, width: 1000, height: 800)
         let right = CGRect(x: 1000, y: 0, width: 1200, height: 900)
@@ -41,6 +41,28 @@ struct CaptureCoordinateConverterTests {
             screenFrames: [primary, right]
         )
 
-        #expect(captureRect == CGRect(x: 1100, y: 40, width: 300, height: 100))
+        #expect(captureRect == CGRect(x: 1100, y: -60, width: 300, height: 100))
+    }
+
+    @Test("A display below the primary maps below it in display space")
+    func lowerDisplayUsesGlobalOrigin() {
+        let primary = CGRect(x: 0, y: 0, width: 2560, height: 1440)
+        let lower = CGRect(x: 500, y: -982, width: 1512, height: 982)
+        #expect(CaptureCoordinateConverter.screenCaptureRect(
+            fromAppKitRect: lower, screenFrames: [primary, lower]
+        ) == CGRect(x: 500, y: 1440, width: 1512, height: 982))
+        #expect(CaptureCoordinateConverter.screenCaptureRect(
+            fromAppKitRect: CGRect(x: 744, y: -532, width: 94, height: 49),
+            screenFrames: [primary, lower]
+        ) == CGRect(x: 744, y: 1923, width: 94, height: 49))
+    }
+
+    @Test("A display above the primary maps to negative display-space y")
+    func upperDisplayUsesGlobalOrigin() {
+        let primary = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let upper = CGRect(x: -300, y: 982, width: 2560, height: 1440)
+        #expect(CaptureCoordinateConverter.screenCaptureRect(
+            fromAppKitRect: upper, screenFrames: [primary, upper]
+        ) == CGRect(x: -300, y: -1440, width: 2560, height: 1440))
     }
 }

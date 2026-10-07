@@ -4,14 +4,17 @@ import Foundation
 enum CaptureCoordinateConverter {
     static func screenCaptureRect(fromAppKitRect rect: CGRect, screenFrames: [CGRect]) -> CGRect {
         guard !rect.isNull,
-              let screenFrame = dominantScreenFrame(for: rect, screenFrames: screenFrames)
+              let primaryScreenFrame = screenFrames.first
         else {
             return rect
         }
 
         return CGRect(
             x: rect.minX,
-            y: screenFrame.minY + screenFrame.maxY - rect.maxY,
+            // Display-space coordinates share the primary display's top-left origin.
+            // Flipping around the selected display moves vertically arranged displays
+            // to the wrong side of the primary display.
+            y: primaryScreenFrame.maxY - rect.maxY,
             width: rect.width,
             height: rect.height
         )
