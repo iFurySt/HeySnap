@@ -11,6 +11,7 @@ enum CaptureSelection {
     case editRegion(CGRect, CapturedScreenshot?)
     case scrollingCapture(CapturedScreenshot)
     case window(WindowDescriptor)
+    case textCopied
     case cancelled
 }
 
@@ -113,7 +114,10 @@ final class AreaSelectionSession {
     private var scrollingToolbarView: AreaSelectionView?
     private var scrollingHUD: ScrollingCaptureHUD?
 
-    private enum ScrollingDestination { case copy, save, pin, editor }
+    private enum ScrollingDestination { case copy, save, pin, ocr, editor }
+    private var ocrTask: Task<Void, Never>?
+    private let textRecognizer: @Sendable (CGImage) throws -> String
+    private let ocrPasteboard: NSPasteboard
     private var pointerDownPoint: CGPoint?
     private var activeMarkupHandle: OverlaySelectionHandle?
     private var resizeMarkupOrigin: CGRect?
@@ -154,8 +158,12 @@ final class AreaSelectionSession {
         quickMarkupEnabled: Bool,
         screenSnapshot: CapturedScreenshot?,
         onScrollingCapture: @escaping (CGRect, ScrollingCaptureCancellation, @escaping (CapturedScreenshot?) -> Void) -> Void,
+        textRecognizer: @escaping @Sendable (CGImage) throws -> String = { try ScreenshotTextRecognizer.recognize($0) },
+        ocrPasteboard: NSPasteboard = .general,
         onComplete: @escaping (CaptureSelection) -> Void
     ) {
+        self.textRecognizer = textRecognizer
+        self.ocrPasteboard = ocrPasteboard
         self.quickMarkupEnabled = quickMarkupEnabled
         self.screenSnapshot = screenSnapshot
         self.snapshotScreenFrame = Self.snapshotScreenFrame(for: screenSnapshot)
@@ -696,11 +704,13 @@ final class AreaSelectionSession {
             refreshOverlays()
             return
         }
+        guard ocrTask == nil || slot.kind == .cancel else { return }
         if scrollingModeEnabled {
             switch slot.kind {
             case .done: completeScrolling(.copy)
             case .save: completeScrolling(.save)
             case .pin: completeScrolling(.pin)
+            case .ocr: completeScrolling(.ocr)
             case .editor: completeScrolling(.editor)
             case .cancel: cancel()
             default: refreshOverlays()
@@ -753,6 +763,11 @@ final class AreaSelectionSession {
                 commitActiveTextIfNeeded()
                 let rect = markupRect.integral
                 finish(.pinRegion(rect, markupAnnotations, preCapturedRegion(for: rect)))
+            }
+        case .ocr:
+            if let markupRect {
+                commitActiveTextIfNeeded()
+                recognizeSelectionText(preCapturedRegion(for: markupRect.integral))
             }
         case .editor:
             if let markupRect {
@@ -1027,7 +1042,43 @@ final class AreaSelectionSession {
         case .copy: finish(.copyRegion(rect, [], capture))
         case .save: finish(.saveRegion(rect, [], capture))
         case .pin: finish(.pinRegion(rect, [], capture))
+        case .ocr:
+            scrollingDestination = nil
+            recognizeSelectionText(capture)
         case .editor: finish(.editRegion(rect, capture))
+        }
+    }
+
+    private func recognizeSelectionText(_ capture: CapturedScreenshot?) {
+        guard !didComplete, ocrTask == nil else { return }
+        guard let capture else {
+            showNotice("无法读取选区，请重新框选后重试")
+            refreshOverlays()
+            return
+        }
+        showNotice("正在识别文字…")
+        refreshOverlays()
+        let recognize = textRecognizer
+        ocrTask = Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) {
+                Result { try recognize(capture.image) }
+            }.value
+            guard let self, !Task.isCancelled, !self.didComplete else { return }
+            self.ocrTask = nil
+            switch result {
+            case .success(let text) where !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty:
+                self.ocrPasteboard.clearContents()
+                if self.ocrPasteboard.setString(text, forType: .string) {
+                    self.finish(.textCopied)
+                    return
+                }
+                self.showNotice("无法复制文字，请重试")
+            case .success:
+                self.showNotice("未识别到文字，请调整选区后重试")
+            case .failure:
+                self.showNotice("文字识别失败，请重试")
+            }
+            self.refreshOverlays()
         }
     }
 
@@ -1374,7 +1425,7 @@ final class AreaSelectionSession {
     }
 
     private func defaultBarRect(near rect: CGRect) -> CGRect {
-        let size = CGSize(width: 690, height: 48)
+        let size = CGSize(width: 734, height: 48)
         let margin: CGFloat = 12
         let screenFrame = NSScreen.screens.first(where: { $0.frame.intersects(rect) })?.frame
             ?? NSScreen.main?.frame
@@ -1408,6 +1459,8 @@ final class AreaSelectionSession {
     private func finish(_ selection: CaptureSelection) {
         guard !didComplete else { return }
         didComplete = true
+        ocrTask?.cancel()
+        ocrTask = nil
 
         scrollingHUD?.close()
         scrollingHUD = nil
@@ -2331,6 +2384,7 @@ struct QuickMarkupBarSlot {
         case highlight
         case scrolling
         case pin
+        case ocr
         case editor
         case save
         case cancel
@@ -2367,6 +2421,8 @@ struct QuickMarkupBarSlot {
                 return "arrow.up.and.down"
             case .pin:
                 return "pin"
+            case .ocr:
+                return "text.viewfinder"
             case .editor:
                 return "pencil.and.outline"
             case .save:
@@ -2413,6 +2469,8 @@ struct QuickMarkupBarSlot {
                 return "Scrolling Capture"
             case .pin:
                 return "Pin"
+            case .ocr:
+                return "OCR"
             case .editor:
                 return "Open Editor"
             case .save:
@@ -2455,6 +2513,7 @@ struct QuickMarkupBarSlot {
         .scrolling,
         .pin,
         .separator,
+        .ocr,
         .editor,
         .save,
         .cancel,

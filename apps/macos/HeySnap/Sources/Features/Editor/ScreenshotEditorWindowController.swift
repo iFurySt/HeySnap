@@ -310,7 +310,6 @@ private enum EditorToolbarMetrics {
 
 private enum EditorToolbarItemID {
     static let brand = NSToolbarItem.Identifier("heysnap.editor.brand")
-    static let ocr = NSToolbarItem.Identifier("heysnap.editor.ocr")
     static let primaryActions = NSToolbarItem.Identifier("heysnap.editor.primaryActions")
     static let tools = NSToolbarItem.Identifier("heysnap.editor.tools")
     static let colorAndSize = NSToolbarItem.Identifier("heysnap.editor.colorAndSize")
@@ -476,6 +475,7 @@ private struct EditorToolbarAction: Identifiable {
     let id: String
     let title: String
     let symbolName: String
+    var isEnabled: Bool = true
     let perform: () -> Void
 }
 
@@ -502,6 +502,8 @@ private struct EditorToolbarActionButton: View {
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        .disabled(!action.isEnabled)
+        .accessibilityIdentifier("heysnap.editor.\(action.id)")
         .overlay(alignment: .bottom) {
             if showsTooltip {
                 Text(action.title)
@@ -566,7 +568,7 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
     private var shapeBar: ShapePropertyBar?
     private var didApplyInitialFit = false
     private var wheelZoomAccumulator: CGFloat = 0
-    private weak var ocrToolbarItem: NSToolbarItem?
+    private weak var primaryActionsHostingView: NSHostingView<EditorToolbarActionGroup>?
     private var ocrTask: Task<Void, Never>?
     private let ocrStatusLabel = NSTextField(labelWithString: "")
     private var ocrNoticeWorkItem: DispatchWorkItem?
@@ -716,7 +718,6 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
 
         toolbarItemIdentifiers = [
             EditorToolbarItemID.brand,
-            EditorToolbarItemID.ocr,
             EditorToolbarItemID.primaryActions,
             .space
         ] + [
@@ -769,20 +770,8 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
         switch itemIdentifier {
         case EditorToolbarItemID.brand:
             return viewToolbarItem(identifier: itemIdentifier, label: "HeySnap", view: brandView())
-        case EditorToolbarItemID.ocr:
-            let item = NSToolbarItem(itemIdentifier: itemIdentifier)
-            item.label = "OCR"
-            item.paletteLabel = "Recognize Text"
-            item.toolTip = "Recognize screenshot text and copy"
-            item.image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: "OCR")
-            item.target = self
-            item.action = #selector(recognizeText)
-            item.autovalidates = false
-            item.visibilityPriority = .high
-            ocrToolbarItem = item
-            return item
         case EditorToolbarItemID.primaryActions:
-            return viewToolbarItem(identifier: itemIdentifier, label: "Copy and Save", view: primaryActionGroupView())
+            return viewToolbarItem(identifier: itemIdentifier, label: "OCR, Copy and Save", view: primaryActionGroupView())
         case EditorToolbarItemID.tools:
             return viewToolbarItem(identifier: itemIdentifier, label: "Tools", view: toolGroupView())
         case EditorToolbarItemID.colorAndSize:
@@ -820,14 +809,23 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
     }
 
     private func primaryActionGroupView() -> NSView {
-        NSHostingView(rootView: EditorToolbarActionGroup(actions: [
+        let view = NSHostingView(rootView: primaryActionGroup(ocrEnabled: true))
+        primaryActionsHostingView = view
+        return view
+    }
+
+    private func primaryActionGroup(ocrEnabled: Bool) -> EditorToolbarActionGroup {
+        EditorToolbarActionGroup(actions: [
+            EditorToolbarAction(id: "ocr", title: "OCR", symbolName: "text.viewfinder", isEnabled: ocrEnabled) { [weak self] in
+                self?.recognizeText()
+            },
             EditorToolbarAction(id: "copy", title: "Copy", symbolName: "doc.on.doc") { [weak self] in
                 self?.copyImage()
             },
             EditorToolbarAction(id: "save", title: "Save", symbolName: "square.and.arrow.down") { [weak self] in
                 self?.saveImage()
             }
-        ]))
+        ])
     }
 
     private func historyActionGroupView() -> NSView {
@@ -1110,7 +1108,7 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
     @objc private func recognizeText() {
         guard ocrTask == nil else { return }
         let image = editorView.imageForTextRecognition()
-        ocrToolbarItem?.isEnabled = false
+        primaryActionsHostingView?.rootView = primaryActionGroup(ocrEnabled: false)
         showOCRNotice("Recognizing text…", dismiss: false)
         ocrTask = Task { [weak self] in
             let result = await Task.detached(priority: .userInitiated) {
@@ -1118,7 +1116,7 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
             }.value
             guard let self, !Task.isCancelled else { return }
             self.ocrTask = nil
-            self.ocrToolbarItem?.isEnabled = true
+            self.primaryActionsHostingView?.rootView = self.primaryActionGroup(ocrEnabled: true)
             switch result {
             case .success(let text) where text.isEmpty:
                 self.showOCRNotice("No text found")
@@ -1143,6 +1141,7 @@ private final class ScreenshotEditorViewController: NSViewController, NSToolbarD
         ocrTask?.cancel()
         ocrTask = nil
         ocrNoticeWorkItem?.cancel()
+        primaryActionsHostingView?.rootView = primaryActionGroup(ocrEnabled: true)
     }
 
     private func showOCRNotice(_ message: String, dismiss: Bool = true) {

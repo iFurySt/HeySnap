@@ -248,6 +248,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Task { @MainActor in
                     await self.handleWindowCapture(windowID: window.windowID)
                 }
+            case .textCopied:
+                AppLogger.info("Quick markup OCR text copied to clipboard.")
             case .cancelled:
                 AppLogger.info("Area capture cancelled.")
             }

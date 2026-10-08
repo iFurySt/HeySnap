@@ -23,17 +23,18 @@ struct EditorOCRTests {
         controller.showWindow(nil)
         let window = controller.window!
         window.setContentSize(CGSize(width: 1100, height: 600))
-        let item = window.toolbar!.items.first { $0.itemIdentifier.rawValue == "heysnap.editor.ocr" }!
-        try check(item.image != nil && item.isEnabled, "OCR must be visible and enabled in the actual Editor toolbar")
+        let item = window.toolbar!.items.first { $0.itemIdentifier.rawValue == "heysnap.editor.primaryActions" }!
+        try check(!window.toolbar!.items.contains { $0.itemIdentifier.rawValue == "heysnap.editor.ocr" }, "OCR must share the primary group, with no separate toolbar item")
+        try await Task.sleep(for: .milliseconds(100))
+        try check(item.view != nil && item.view!.fittingSize.width >= 110, "Shared group must fit three action buttons")
         pasteboard.clearContents(); pasteboard.setString("Before OCR", forType: .string)
-        NSApp.sendAction(item.action!, to: item.target, from: item)
-        try check(!item.isEnabled, "OCR must disable repeat clicks while running")
+        try check(NSApp.sendAction(NSSelectorFromString("recognizeText"), to: window.contentViewController, from: item.view), "OCR action must remain connected")
         for _ in 0..<200 {
-            if item.isEnabled { break }
+            if pasteboard.string(forType: .string)?.contains("Hello OCR 123") == true { break }
             try await Task.sleep(for: .milliseconds(50))
         }
-        try check(item.isEnabled && pasteboard.string(forType: .string)?.contains("Hello OCR 123") == true,
-                     "Clicking the real OCR button must recognize and copy the screenshot")
+        try check(pasteboard.string(forType: .string)?.contains("Hello OCR 123") == true,
+                     "Clicking the grouped OCR button must recognize and copy the screenshot")
         if CommandLine.arguments.count > 1, let frameView = window.contentView?.superview,
            let rep = frameView.bitmapImageRepForCachingDisplay(in: frameView.bounds) {
             frameView.cacheDisplay(in: frameView.bounds, to: rep)
@@ -45,15 +46,13 @@ struct EditorOCRTests {
         blankController.showWindow(nil)
         let blankWindow = blankController.window!
         let blankItem = blankWindow.toolbar!.items.first { $0.itemIdentifier == item.itemIdentifier }!
+        try await Task.sleep(for: .milliseconds(100))
         pasteboard.clearContents(); pasteboard.setString("Keep clipboard", forType: .string)
-        NSApp.sendAction(blankItem.action!, to: blankItem.target, from: blankItem)
-        for _ in 0..<200 {
-            if blankItem.isEnabled { break }
-            try await Task.sleep(for: .milliseconds(50))
-        }
-        try check(blankItem.isEnabled && pasteboard.string(forType: .string) == "Keep clipboard", "Empty OCR must preserve clipboard")
+        try check(NSApp.sendAction(NSSelectorFromString("recognizeText"), to: blankWindow.contentViewController, from: blankItem.view), "Blank-image OCR action must respond")
+        try await Task.sleep(for: .milliseconds(500))
+        try check(pasteboard.string(forType: .string) == "Keep clipboard", "Empty OCR must preserve clipboard")
         blankWindow.close()
-        print("Editor OCR passed: actual toolbar icon, background action, automatic clipboard copy, empty-result preservation.")
+        print("Editor OCR passed: shared three-button toolbar group, OCR action, clipboard copy, empty-result preservation.")
     }
 
     static func check(_ condition: Bool, _ message: String) throws {
