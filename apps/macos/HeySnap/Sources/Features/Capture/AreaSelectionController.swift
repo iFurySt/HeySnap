@@ -73,7 +73,7 @@ final class AreaSelectionController {
 /// Coordinates one selection session across all displays. Owns a borderless overlay window
 /// per screen and the shared interaction state (hovered window, drag rectangle).
 @MainActor
-private final class AreaSelectionSession {
+final class AreaSelectionSession {
     private let onComplete: (CaptureSelection) -> Void
     private let quickMarkupEnabled: Bool
     private let screenSnapshot: CapturedScreenshot?
@@ -106,6 +106,14 @@ private final class AreaSelectionSession {
     private var noticeWorkItem: DispatchWorkItem?
     private var isScrollingCaptureInProgress = false
     private var scrollingCancellation: ScrollingCaptureCancellation?
+    private var scrollingModeEnabled = false
+    private var scrollingResult: CapturedScreenshot?
+    private var scrollingDestination: ScrollingDestination?
+    private var scrollingToolbarWindow: AreaSelectionWindow?
+    private var scrollingToolbarView: AreaSelectionView?
+    private var scrollingHUD: ScrollingCaptureHUD?
+
+    private enum ScrollingDestination { case copy, save, pin, editor }
     private var pointerDownPoint: CGPoint?
     private var activeMarkupHandle: OverlaySelectionHandle?
     private var resizeMarkupOrigin: CGRect?
@@ -218,7 +226,7 @@ private final class AreaSelectionSession {
     }
 
     var markupToolIndex: Int {
-        markupTool.barIndex
+        scrollingModeEnabled ? QuickMarkupBarSlot.kinds.firstIndex(of: .scrolling) ?? markupTool.barIndex : markupTool.barIndex
     }
 
     var activePropertyTool: OverlayMarkupTool? {
@@ -262,7 +270,7 @@ private final class AreaSelectionSession {
     }
 
     func markupPropertyBarRect(in screenFrame: CGRect) -> CGRect? {
-        guard propertyTool != nil, let markupBarRect else { return nil }
+        guard !scrollingModeEnabled, propertyTool != nil, let markupBarRect else { return nil }
         let size = propertyBarSize
         let gap: CGFloat = 8
         let globalScreenFrame = NSScreen.screens.first(where: { $0.frame.intersects(markupBarRect) })?.frame ?? screenFrame
@@ -306,10 +314,6 @@ private final class AreaSelectionSession {
 
     func handleMouseDown(globalPoint: CGPoint, clickCount: Int = 1, modifiers: NSEvent.ModifierFlags = []) {
         isConstrainedDrawing = modifiers.contains(.shift)
-        guard !isScrollingCaptureInProgress else {
-            refreshOverlays()
-            return
-        }
         if let markupRect {
             pointerDownPoint = globalPoint
             if let propertyBarRect = propertyBarRectGlobal(), propertyBarRect.contains(globalPoint) {
@@ -325,6 +329,7 @@ private final class AreaSelectionSession {
                 markupBarOrigin = markupBarRect
                 return
             }
+            guard !scrollingModeEnabled else { return }
             commitActiveTextIfNeeded()
             if let hit = hitAnnotationHandle(at: globalPoint) {
                 selectMarkupAnnotation(hit.id)
@@ -601,6 +606,9 @@ private final class AreaSelectionSession {
 
     func cancel() {
         if isScrollingCaptureInProgress {
+            scrollingCancellation?.onPreview = nil
+            scrollingCancellation?.onChange = nil
+            scrollingCancellation?.onMessage = nil
             scrollingCancellation?.cancel()
             isScrollingCaptureInProgress = false
             scrollingCancellation = nil
@@ -615,6 +623,10 @@ private final class AreaSelectionSession {
 
     private func completeMarkup(_ action: OverlayMarkupCompletionAction) {
         guard let markupRect else { return }
+        if scrollingModeEnabled {
+            completeScrolling(action == .copy ? .copy : .save)
+            return
+        }
         commitActiveTextIfNeeded()
         let rect = markupRect.integral
         switch action {
@@ -637,7 +649,9 @@ private final class AreaSelectionSession {
         return WindowEnumerator.window(at: point, excludedWindowNumbers: excludedWindowNumbers)
     }
 
-    var showsFrozenDesktop: Bool { !isScrollingCaptureInProgress }
+    var showsFrozenDesktop: Bool { !scrollingModeEnabled }
+    var showsScrollingOptions: Bool { scrollingModeEnabled }
+    var isAutomaticScrolling: Bool { scrollingCancellation?.isAutomatic == true }
 
     private var dragRect: CGRect? {
         guard let dragStart, let dragCurrent else { return nil }
@@ -653,6 +667,7 @@ private final class AreaSelectionSession {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         defer { CATransaction.commit() }
+        updateScrollingToolbarWindow()
         for view in views {
             view.needsDisplay = true
             view.displayIfNeeded()
@@ -679,6 +694,17 @@ private final class AreaSelectionSession {
         guard let markupBarRect else { return }
         guard let slot = QuickMarkupBarSlot.slot(at: globalPoint, in: markupBarRect) else {
             refreshOverlays()
+            return
+        }
+        if scrollingModeEnabled {
+            switch slot.kind {
+            case .done: completeScrolling(.copy)
+            case .save: completeScrolling(.save)
+            case .pin: completeScrolling(.pin)
+            case .editor: completeScrolling(.editor)
+            case .cancel: cancel()
+            default: refreshOverlays()
+            }
             return
         }
         switch slot.kind {
@@ -772,7 +798,7 @@ private final class AreaSelectionSession {
     var currentPropertyFontSize: CGFloat { currentMarkupFontSize }
 
     private func propertyBarRectGlobal() -> CGRect? {
-        guard propertyTool != nil, let markupBarRect else { return nil }
+        guard !scrollingModeEnabled, propertyTool != nil, let markupBarRect else { return nil }
         let size = propertyBarSize
         let gap: CGFloat = 8
         let screenFrame = NSScreen.screens.first(where: { $0.frame.intersects(markupBarRect) })?.frame
@@ -930,6 +956,7 @@ private final class AreaSelectionSession {
     private func showNotice(_ message: String) {
         noticeWorkItem?.cancel()
         noticeMessage = message
+        if scrollingModeEnabled { scrollingHUD?.showNotice(message) }
 
         let item = DispatchWorkItem { [weak self] in
             guard let self, self.noticeMessage == message else { return }
@@ -942,28 +969,91 @@ private final class AreaSelectionSession {
 
     private func beginScrollingCapture(rect: CGRect) {
         isScrollingCaptureInProgress = true
+        scrollingModeEnabled = true
+        scrollingResult = nil
+        scrollingDestination = nil
         let cancellation = ScrollingCaptureCancellation()
         scrollingCancellation = cancellation
+        cancellation.onChange = { [weak self] in self?.refreshOverlays() }
+        cancellation.onMessage = { [weak self] message in
+            self?.showNotice(message)
+            self?.refreshOverlays()
+        }
         setOverlayInteractionEnabled(false)
         propertyTool = nil
         selectedMarkupAnnotationID = nil
-        showNotice("Scrolling capture in progress...")
+        scrollingHUD = ScrollingCaptureHUD(selection: rect) { [weak self] in
+            guard let control = self?.scrollingCancellation, !control.isFinished else { return }
+            control.setAutomatic(!control.isAutomatic)
+        }
+        cancellation.onPreview = { [weak self] image in self?.scrollingHUD?.updatePreview(image) }
+        scrollingHUD?.showNotice(ScrollingCaptureHUD.introduction)
         refreshOverlays()
 
         onScrollingCapture(rect, cancellation) { [weak self] capture in
             Task { @MainActor in
                 guard let self, self.isScrollingCaptureInProgress else { return }
                 self.isScrollingCaptureInProgress = false
+                cancellation.onChange = nil
+                cancellation.onMessage = nil
+                cancellation.onPreview = nil
                 self.scrollingCancellation = nil
                 if let capture {
-                    self.finish(.scrollingCapture(capture))
+                    self.scrollingResult = capture
+                    if let destination = self.scrollingDestination { self.completeScrolling(destination) }
+                    else { self.showNotice("Capture ready. Use the toolbar to copy, save or edit."); self.refreshOverlays() }
                 } else {
+                    self.scrollingHUD?.close()
+                    self.scrollingHUD = nil
+                    self.scrollingModeEnabled = false
                     self.setOverlayInteractionEnabled(true)
-                    self.showNotice("Could not detect scrolling movement.")
+                    self.showNotice(cancellation.isCancelled ? "Scrolling capture cancelled." : "Scrolling capture failed. Please try again.")
                     self.refreshOverlays()
                 }
             }
         }
+    }
+
+    private func completeScrolling(_ destination: ScrollingDestination) {
+        guard let rect = markupRect else { return }
+        guard let capture = scrollingResult else {
+            // Keep the first requested action while the final frame is being captured.
+            guard scrollingDestination == nil else { return }
+            scrollingDestination = destination
+            scrollingCancellation?.finish()
+            return
+        }
+        switch destination {
+        case .copy: finish(.copyRegion(rect, [], capture))
+        case .save: finish(.saveRegion(rect, [], capture))
+        case .pin: finish(.pinRegion(rect, [], capture))
+        case .editor: finish(.editRegion(rect, capture))
+        }
+    }
+
+    private func updateScrollingToolbarWindow() {
+        scrollingHUD?.updateAutomatic(isAutomaticScrolling, enabled: isScrollingCaptureInProgress && scrollingDestination == nil)
+        guard scrollingModeEnabled, !didComplete, let bar = markupBarRect else {
+            scrollingToolbarWindow?.orderOut(nil)
+            scrollingToolbarWindow = nil
+            scrollingToolbarView = nil
+            return
+        }
+        let frame = bar.union(propertyBarRectGlobal() ?? bar).insetBy(dx: -2, dy: -2)
+        if let window = scrollingToolbarWindow, let view = scrollingToolbarView {
+            window.setFrame(frame, display: false)
+            view.updateScreenFrame(frame)
+        } else {
+            let view = AreaSelectionView(screenFrame: frame, screenSnapshot: nil, session: self, toolbarOnly: true)
+            let window = AreaSelectionWindow(frame: frame, contentView: view)
+            scrollingToolbarWindow = window
+            scrollingToolbarView = view
+            excludedWindowNumbers.insert(CGWindowID(window.windowNumber))
+            window.orderFrontRegardless()
+            window.makeKey()
+        }
+        scrollingToolbarView?.needsDisplay = true
+        scrollingToolbarView?.displayIfNeeded()
     }
 
     private func setOverlayInteractionEnabled(_ isEnabled: Bool) {
@@ -1319,6 +1409,12 @@ private final class AreaSelectionSession {
         guard !didComplete else { return }
         didComplete = true
 
+        scrollingHUD?.close()
+        scrollingHUD = nil
+        scrollingCancellation?.onPreview = nil
+        scrollingToolbarWindow?.orderOut(nil)
+        scrollingToolbarWindow = nil
+        scrollingToolbarView = nil
         let overlayNumbers = excludedWindowNumbers
         for window in windows {
             window.orderOut(nil)
@@ -1412,9 +1508,13 @@ private final class AreaSelectionSession {
 /// A borderless, non-activating overlay panel. Using a non-activating panel lets it become
 /// key (for Escape handling) without bringing HeySnap to the foreground.
 private final class AreaSelectionWindow: NSPanel {
-    init(screen: NSScreen, contentView: NSView) {
+    convenience init(screen: NSScreen, contentView: NSView) {
+        self.init(frame: screen.frame, contentView: contentView)
+    }
+
+    init(frame: CGRect, contentView: NSView) {
         super.init(
-            contentRect: screen.frame,
+            contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -1430,7 +1530,7 @@ private final class AreaSelectionWindow: NSPanel {
         ignoresMouseEvents = false
         acceptsMouseMovedEvents = true
         self.contentView = contentView
-        setFrame(screen.frame, display: true)
+        setFrame(frame, display: true)
     }
 
     override var canBecomeKey: Bool { true }
@@ -1440,12 +1540,14 @@ private final class AreaSelectionWindow: NSPanel {
 /// Draws the dim mask plus the active highlight (hovered window or drag rectangle) for one
 /// screen, and forwards pointer events to the shared session in global coordinates.
 private final class AreaSelectionView: NSView, NSTextViewDelegate {
-    private let screenFrame: CGRect
+    private var screenFrame: CGRect
+    private let toolbarOnly: Bool
     private let screenSnapshot: CGImage?
     private weak var session: AreaSelectionSession?
     private var activeTextEditor: AnnotationInlineTextView?
 
-    init(screenFrame: CGRect, screenSnapshot: CGImage?, session: AreaSelectionSession) {
+    init(screenFrame: CGRect, screenSnapshot: CGImage?, session: AreaSelectionSession, toolbarOnly: Bool = false) {
+        self.toolbarOnly = toolbarOnly
         self.screenFrame = screenFrame
         self.screenSnapshot = screenSnapshot
         self.session = session
@@ -1458,6 +1560,8 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
+
+    func updateScreenFrame(_ frame: CGRect) { screenFrame = frame }
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -1629,6 +1733,11 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
 
+        if toolbarOnly {
+            if let propertyRect = session?.markupPropertyBarRect(in: screenFrame) { drawPropertyBar(in: propertyRect) }
+            if let barRect = session?.markupBarRect(in: screenFrame) { drawMarkupBar(in: barRect) }
+            return
+        }
         let activeRect = activeRectInViewCoordinates()
         CaptureSnapshotGeometry.drawBackdrop(session?.showsFrozenDesktop == true ? screenSnapshot : nil, in: bounds, selection: activeRect)
         guard let activeRect else { return }
@@ -1638,6 +1747,7 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
         NSColor.systemBlue.setStroke()
         border.stroke()
 
+        if session?.showsScrollingOptions == true { return }
         if session?.isInMarkupMode == true {
             drawMarkupAnnotations()
             drawMarkupHandles(in: activeRect)
@@ -1845,7 +1955,7 @@ private final class AreaSelectionView: NSView, NSTextViewDelegate {
             drawToolbarTooltip(title, anchoredTo: slot.rect, in: rect)
         }
 
-        if let message = session?.currentNoticeMessage {
+        if !toolbarOnly, let message = session?.currentNoticeMessage {
             drawOverlayNotice(message, anchoredTo: rect)
         }
     }
@@ -2204,7 +2314,7 @@ private enum OverlayMarkupCompletionAction {
     case save
 }
 
-private struct QuickMarkupBarSlot {
+struct QuickMarkupBarSlot {
     let index: Int
     let kind: Kind
     let rect: CGRect

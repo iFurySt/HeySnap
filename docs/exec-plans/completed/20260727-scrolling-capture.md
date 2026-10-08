@@ -1,6 +1,8 @@
 # Scrolling Capture
 
-Status: Active
+Status: Completed (initial manual-only implementation)
+
+2026-10-07：后续手动/自动修复与真实浏览器验证由 [新的执行计划](../active/20261007-reliable-scrolling-capture.md) 接续；下文保留初版范围与原始验证要求，不代表当前行为。
 
 ## Goal
 

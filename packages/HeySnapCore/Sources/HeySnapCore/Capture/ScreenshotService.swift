@@ -112,7 +112,8 @@ final class ScreenshotService: ObservableObject {
 
     func captureScrollingFrame(rect: CGRect) async throws -> CapturedScreenshot {
         logInfo("Scrolling capture frame requested with rect=\(rect).")
-        return try await captureScreenExcludingCurrentApplication(rect: rect)
+        let provider = try await makeScrollingFrameProvider(rect: rect)
+        return try await provider()
     }
 
     func captureAndSave(windowID: CGWindowID) async {
@@ -281,7 +282,8 @@ final class ScreenshotService: ObservableObject {
         throw ScreenshotError.unsupportedOS
     }
 
-    private func captureScreenExcludingCurrentApplication(rect: CGRect) async throws -> CapturedScreenshot {
+    /// Prepare the filter once per scrolling session, including future windows of this app.
+    func makeScrollingFrameProvider(rect: CGRect) async throws -> () async throws -> CapturedScreenshot {
         if #available(macOS 26.0, *) {
             guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else {
                 hasScreenRecordingPermission = false
@@ -325,12 +327,11 @@ final class ScreenshotService: ObservableObject {
             configuration.width = Int(sourceRect.width * scale)
             configuration.height = Int(sourceRect.height * scale)
 
-            logInfo("Calling SCScreenshotManager.captureImage filtered appKitRect=\(rect), sourceRect=\(sourceRect), excludedApps=\(excludedApplications.count).")
-            let image = try await SCScreenshotManager.captureImage(
-                contentFilter: filter,
-                configuration: configuration
-            )
-            return CapturedScreenshot(image: image, scaleFactor: scale)
+            logInfo("Prepared scrolling capture filter rect=\(rect), excludedApps=\(excludedApplications.count).")
+            return {
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+                return CapturedScreenshot(image: image, scaleFactor: scale)
+            }
         }
 
         throw ScreenshotError.unsupportedOS

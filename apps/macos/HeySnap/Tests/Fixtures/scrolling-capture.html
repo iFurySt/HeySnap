@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>HeySnap scrolling capture verification</title>
+<style>
+* { box-sizing: border-box; }
+html { scroll-behavior: auto; }
+body { margin: 0; background: white; color: #182230; font: 18px/1.6 system-ui; }
+header, footer { padding: 24px 40px; background: #e9f3ff; }
+section { height: 180px; padding: 20px 40px; border-bottom: 1px solid #a9b6c5; }
+h1, h2, p { margin: 0 0 8px; }
+section:nth-child(3n) { background: #f4f6f8; }
+</style>
+<header><h1>START — HeySnap scrolling capture</h1><p>Every numbered section must appear once, followed by END.</p></header>
+<main id="content"></main>
+<footer><h2>END — all 16 sections captured</h2><p>This footer verifies that capture reached the bottom.</p></footer>
+<script>
+for (let number = 1; number <= 16; number++) {
+  const section = document.createElement('section');
+  const heading = document.createElement('h2');
+  heading.textContent = `Section ${String(number).padStart(2, '0')} — marker ${number * 173}`;
+  const paragraph = document.createElement('p');
+  paragraph.textContent = `Capture verification paragraph ${number}: manual pauses must keep this row; automatic scrolling must preserve its position.`;
+  section.append(heading, paragraph);
+  document.querySelector('#content').append(section);
+}
+</script>
+</html>
